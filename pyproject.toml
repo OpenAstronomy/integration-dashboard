@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "astropy-integration"
+name = "integration-dashboard"
 version = "0.1.0"
-description = "Run and dashboard the astropy ecosystem integration matrix."
+description = "Run and dashboard an ecosystem integration-testing matrix."
 requires-python = ">=3.11"
 dependencies = [
     "jinja2",
@@ -14,10 +14,10 @@ dependencies = [
 ]
 
 [project.scripts]
-astropy-integration = "astropy_integration.cli:main"
+integration-dashboard = "integration_dashboard.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["astropy_integration*"]
+include = ["integration_dashboard*"]
 
 [tool.setuptools.package-data]
-astropy_integration = ["templates/*.html", "templates/*.css"]
+integration_dashboard = ["templates/*.html", "templates/*.css"]

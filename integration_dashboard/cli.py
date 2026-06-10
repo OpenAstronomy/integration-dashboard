@@ -6,7 +6,7 @@ from . import dashboard, run
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="astropy-integration")
+    parser = argparse.ArgumentParser(prog="integration-dashboard")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     run_p = sub.add_parser(

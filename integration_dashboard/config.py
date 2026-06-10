@@ -2,9 +2,9 @@
 
 The config has three top-level keys:
 
-  - ``core_package``: the ecosystem's core package (astropy here, but
-    swap it to retarget the whole harness at another ecosystem). It is
-    installed into the shared venv before anything else.
+  - ``core_package``: the ecosystem's core package, installed into the
+    shared venv before anything else. Point it at a different package to
+    retarget the whole harness at another ecosystem.
   - ``columns``: a flat list of ``{python, variant}`` pairs. Each one
     is a single run and a single dashboard column; Python version and
     variant are fully decoupled.

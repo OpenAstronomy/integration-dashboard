@@ -14,12 +14,12 @@ axes are independent (see `columns:` in packages.yaml). `--variant`
 and `--python` narrow the configured columns down to a subset.
 
 Usage:
-    astropy-integration run                                    # every configured column
-    astropy-integration run --variant stable                   # configured columns with variant=stable
-    astropy-integration run --variant stable --python 3.12     # one specific column
-    astropy-integration run --python 3.14t                     # configured columns with python=3.14t
-    astropy-integration run --variant stable --packages reproject,sunpy
-    astropy-integration run --variant stable --tiers coordinated
+    integration-dashboard run                                    # every configured column
+    integration-dashboard run --variant stable                   # configured columns with variant=stable
+    integration-dashboard run --variant stable --python 3.12     # one specific column
+    integration-dashboard run --python 3.14t                     # configured columns with python=3.14t
+    integration-dashboard run --variant stable --packages foo,bar
+    integration-dashboard run --variant stable --tiers core
 """
 
 import json
@@ -96,7 +96,7 @@ def resolve_specs(packages, variant, core):
             # package's nightly channel; we read the installed version
             # back after install. No explicit pin avoids the PEP 440
             # local-version segment headaches that nightly wheels have
-            # (e.g. 8.1.0.dev53+gabcdef).
+            # (e.g. 1.2.0.dev53+gabcdef).
             #
             # `--index-strategy unsafe-best-match` is required because
             # uv's default ("first-index") only considers a single
@@ -252,7 +252,7 @@ def _write_no_downgrade_constraints(python, path):
     for name, ver in sorted(frozen.items()):
         try:
             # Drop any PEP 440 local-version segment (e.g. the '+g1a2b3c4'
-            # on astropy/pyerfa nightly wheels): uv rejects a '>=' specifier
+            # that nightly wheels often carry): uv rejects a '>=' specifier
             # with a local segment and would fail to parse the whole file.
             public = Version(ver).public
         except InvalidVersion:
@@ -261,18 +261,20 @@ def _write_no_downgrade_constraints(python, path):
     Path(path).write_text("\n".join(lines) + ("\n" if lines else ""))
 
 
-# Ordering of tiers when installing/displaying. Unknown tiers sort last.
-TIER_RANK = {"coordinated": 0, "affiliated": 1, "pyopensci": 2, "other": 3}
-
-
 def _install_order(packages):
-    """Coordinated, then affiliated, then pyopensci, then other; alphabetical within each tier."""
+    """Group by tier in order of first appearance, alphabetical within each tier.
+
+    Tiers carry no built-in ranking: whichever tier a package with that
+    tier first appears in the config is installed (and displayed) first.
+    Packages without a tier share a single empty-named group.
+    """
+    tier_rank = {}
+    for pkg in packages:
+        tier = pkg.get("tier", "")
+        tier_rank.setdefault(tier, len(tier_rank))
     return sorted(
         packages,
-        key=lambda p: (
-            TIER_RANK.get(p.get("tier", "coordinated"), 9),
-            p["pypi_name"].lower(),
-        ),
+        key=lambda p: (tier_rank[p.get("tier", "")], p["pypi_name"].lower()),
     )
 
 
@@ -351,13 +353,14 @@ def run_variant(
             common += [f"--index-strategy={core_spec['index_strategy']}"]
 
         print(f"\nInstalling {core['pypi_name']} + pytest...")
-        # pytest-remotedata registers the `remote_data` marker many
-        # astropy ecosystem packages use; with the plugin installed but
-        # `--remote-data` not passed, those tests are skipped automatically
-        # instead of running and timing out on network calls.
+        # `core_package.test_deps` lets a config add pytest plugins shared
+        # by the whole ecosystem (e.g. a plugin that registers a marker so
+        # the matching tests are skipped instead of run) into the venv
+        # alongside pytest itself.
+        test_deps = core.get("test_deps") or []
         rc, err = _run_install(
             common
-            + [core_spec["install"], "pytest", "pytest-timeout", "pytest-remotedata"],
+            + [core_spec["install"], "pytest", "pytest-timeout", *test_deps],
             timeouts["install"],
         )
         if rc != 0:
@@ -374,7 +377,7 @@ def run_variant(
         for pkg, install_spec, target_version in pkg_specs:
             entry = {
                 "name": pkg["pypi_name"],
-                "tier": pkg.get("tier", "coordinated"),
+                "tier": pkg.get("tier", ""),
                 "module": pkg.get("module", pkg["pypi_name"]),
                 "install_spec": install_spec,
                 "target_version": target_version,
@@ -491,8 +494,8 @@ def add_arguments(ap):
     ap.add_argument("--packages", help="Comma-separated subset of package names to run")
     ap.add_argument(
         "--tiers",
-        help="Comma-separated subset of tiers to run (e.g. 'coordinated,other'); "
-        "default: all tiers",
+        help="Comma-separated subset of tiers to run (matching the 'tier' "
+        "values in the config); default: all tiers",
     )
     ap.add_argument("--timeout-install", type=int, default=900)
     ap.add_argument("--timeout-test", type=int, default=1800)
@@ -508,7 +511,7 @@ def run(args):
     packages = all_packages
     if args.tiers:
         wanted_tiers = {t.strip() for t in args.tiers.split(",") if t.strip()}
-        packages = [p for p in packages if p.get("tier", "coordinated") in wanted_tiers]
+        packages = [p for p in packages if p.get("tier", "") in wanted_tiers]
     if args.packages:
         wanted = {n.strip() for n in args.packages.split(",") if n.strip()}
         known = {p["pypi_name"] for p in all_packages}

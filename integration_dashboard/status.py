@@ -1,7 +1,7 @@
 """Shared status vocabulary for integration-test results.
 
-Both `astropy_integration.run` (which writes statuses into results JSON)
-and `astropy_integration.dashboard` (which renders them into the
+Both `integration_dashboard.run` (which writes statuses into results JSON)
+and `integration_dashboard.dashboard` (which renders them into the
 dashboard) use these constants and helpers, so the strings are defined
 in exactly one place.
 """

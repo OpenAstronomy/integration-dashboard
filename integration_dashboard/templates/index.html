@@ -39,9 +39,11 @@
 </thead>
 <tbody>
 {% for tier, group in tier_groups %}
+{% if tier %}
 <tr class="tier-header">
   <th colspan="{{ 1 + columns|length }}">{{ tier|capitalize }}</th>
 </tr>
+{% endif %}
 {% for row in group %}
 <tr>
   <td><span class="pkg-name">{{ row.name }}</span></td>

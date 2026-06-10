@@ -1,6 +1,6 @@
 """Build the single-page integration-matrix dashboard.
 
-Reads every results/<variant>__<python>.json that `astropy-integration run`
+Reads every results/<variant>__<python>.json that `integration-dashboard run`
 wrote and emits a single self-contained `site/index.html` with:
 
   - one row per package
@@ -126,7 +126,7 @@ def _make_rows(by_combo, names, columns):
                 )
                 continue
             if row_tier is None:
-                row_tier = entry.get("tier", "coordinated")
+                row_tier = entry.get("tier", "")
             badge = status.cell_badge(entry)
             anchor = (
                 _anchor_id(name, variant, python)
@@ -140,7 +140,7 @@ def _make_rows(by_combo, names, columns):
                     "resolved_version": entry.get("resolved_version", ""),
                 }
             )
-        rows.append({"name": name, "tier": row_tier or "coordinated", "cells": cells})
+        rows.append({"name": name, "tier": row_tier or "", "cells": cells})
     return rows
 
 
@@ -185,7 +185,7 @@ def build(results_dir, output_dir, config_path):
     output_dir.mkdir(parents=True)
 
     env = Environment(
-        loader=PackageLoader("astropy_integration", "templates"),
+        loader=PackageLoader("integration_dashboard", "templates"),
         autoescape=select_autoescape(["html"]),
     )
 
