@@ -2,7 +2,7 @@ name: self-test
 
 # Dogfoods the reusable workflow against this repo's own source: it calls
 # .github/workflows/integration.yml with `package-spec: .` (install the
-# checked-out code rather than the PyPI release) and a small example
+# checked-out code rather than the main branch) and a small example
 # config, so every push and PR exercises the package and the workflow
 # end to end. preview-link.yml turns the PR run into a clickable preview.
 on:

@@ -13,10 +13,11 @@ on:
       package-spec:
         description: >-
           pip install target for the integration-dashboard package itself.
-          Defaults to the latest stable release on PyPI; this repo's own
-          self-test overrides it to '.' to install the checked-out source.
+          Defaults to the main branch of this repo, since the package is not
+          yet released on PyPI; this repo's own self-test overrides it to '.'
+          to install the checked-out source.
         type: string
-        default: integration-dashboard
+        default: git+https://github.com/OpenAstronomy/integration-dashboard@main
       publish:
         description: Publish the dashboard to gh-pages on non-PR runs.
         type: boolean

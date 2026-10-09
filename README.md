@@ -19,8 +19,10 @@ which uses this package to test the Astropy ecosystem.
 Installing
 ----------
 
+The package is not yet released on PyPI, so install it from this repo:
+
 ```bash
-pip install integration-dashboard
+pip install git+https://github.com/OpenAstronomy/integration-dashboard
 ```
 
 [uv](https://docs.astral.sh/uv/) is required at runtime: the harness shells
@@ -150,21 +152,20 @@ jobs:
   integration:
     permissions:
       contents: write     # to publish the dashboard to gh-pages
-    uses: OpenAstronomy/integration-dashboard/.github/workflows/integration.yml@v1
+    uses: OpenAstronomy/integration-dashboard/.github/workflows/integration.yml@main
     with:
       config: packages.yaml
 ```
 
-Pin the `@v1` ref to a released tag so you track stable releases; by
-default the workflow installs the matching stable `integration-dashboard`
-from PyPI (override with the `package-spec` input, e.g.
-`integration-dashboard==1.2.3`, for an exact pin). The reusable workflow
-reads `columns:` from your config to build the matrix, runs every column,
-and on non-PR runs publishes the dashboard to `gh-pages` (set the
-`publish: false` input to skip that).
-
-For this to resolve, the package must be published to PyPI and you must
-cut a `v1` (or similar) tag on this repo.
+While the package is in early development there are no releases, so use
+`@main` as above. By default the workflow also installs the package from
+the main branch of this repo, so the workflow and the package stay in step.
+To pin both to a specific commit, use that commit for the `uses:` ref and
+set the `package-spec` input to the matching
+`git+https://github.com/OpenAstronomy/integration-dashboard@<commit>`.
+The reusable workflow reads `columns:` from your config to build the
+matrix, runs every column, and on non-PR runs publishes the dashboard to
+`gh-pages` (set the `publish: false` input to skip that).
 
 ### PR previews
 
@@ -187,6 +188,6 @@ consuming repo as well.
 
 This repo tests the package and the reusable workflow against itself:
 `.github/workflows/self-test.yml` calls the same reusable workflow with
-`package-spec: .` (the checked-out source rather than the PyPI release)
+`package-spec: .` (the checked-out source rather than the main branch)
 and the small `example/packages.yaml`, so every push and PR here exercises
 the whole pipeline.
