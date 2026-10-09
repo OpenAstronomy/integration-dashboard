@@ -1,0 +1,37 @@
+name: preview-link
+
+# Companion to the workflow that calls the integration-dashboard reusable
+# workflow. When that run finishes on a pull request, this one attaches a
+# status check to the source commit whose "Details" link goes directly to
+# the rendered dashboard-preview artifact, skipping the artifact summary
+# page.
+#
+# This workflow must live in the caller repo (not the reusable workflow),
+# because `workflow_run` only fires for workflows in the same repository
+# and references them by name. Downstream consumers copy this file and set
+# `workflows:` below to the name of their own caller workflow. Here it
+# watches this repo's `self-test` workflow.
+#
+# Must live on the default branch to take effect.
+on:
+  workflow_run:
+    workflows: ["self-test"]
+    types: [requested, in_progress, completed]
+
+permissions: {}
+
+jobs:
+  redirect:
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write   # to attach a status check to the source commit
+      actions: read     # to look up the source workflow's artifact id
+    steps:
+      - uses: agriyakhetarpal/github-actions-artifacts-redirector-action@3514efb6f242bd9c0a28ea93564c19a2ad7367d2  # v1.0.2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          # With `archive: false`, artifact-name is the uploaded file's
+          # basename without extension (the reusable workflow uploads
+          # site/index.html).
+          artifact-name: index
+          job-title: View dashboard preview

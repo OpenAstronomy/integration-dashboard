@@ -19,8 +19,10 @@ which uses this package to test the Astropy ecosystem.
 Installing
 ----------
 
+The package is not yet released on PyPI, so install it from this repo:
+
 ```bash
-pip install integration-dashboard
+pip install git+https://github.com/OpenAstronomy/integration-dashboard
 ```
 
 [uv](https://docs.astral.sh/uv/) is required at runtime: the harness shells
@@ -128,12 +130,64 @@ entry takes:
 To retarget the harness at a different ecosystem, point `core_package` at
 that ecosystem's core package and replace the `packages` list.
 
-PR-preview smoke runs
----------------------
+Continuous integration (reusable workflow)
+------------------------------------------
 
-`run` honours a `PYTEST_LIMIT_N` environment variable: when set, the result
-JSON records the limit and the dashboard shows a banner, and the limit is
-propagated to the test subprocesses. Truncating each package's collected
-test list to the first N tests requires a repo-root `conftest.py` in the
-project that invokes the harness (because `pytest --pyargs` collects from
-site-packages); that file lives in the consuming repository, not here.
+This repo ships a [reusable workflow](https://docs.github.com/actions/using-workflows/reusing-workflows)
+at `.github/workflows/integration.yml`, so a consuming repo only needs a
+small caller workflow plus its own config. The caller workflow is the
+~15 lines below; commit it alongside a `packages.yaml` and a `conftest.py`
+(copy the one in this repo), and that is the entire setup:
+
+```yaml
+# .github/workflows/integration.yml in the consuming repo
+name: integration
+on:
+  schedule:
+    - cron: '0 6 * * 0'   # Sundays at 06:00 UTC
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  integration:
+    permissions:
+      contents: write     # to publish the dashboard to gh-pages
+    uses: OpenAstronomy/integration-dashboard/.github/workflows/integration.yml@main
+    with:
+      config: packages.yaml
+```
+
+While the package is in early development there are no releases, so use
+`@main` as above. By default the workflow also installs the package from
+the main branch of this repo, so the workflow and the package stay in step.
+To pin both to a specific commit, use that commit for the `uses:` ref and
+set the `package-spec` input to the matching
+`git+https://github.com/OpenAstronomy/integration-dashboard@<commit>`.
+The reusable workflow reads `columns:` from your config to build the
+matrix, runs every column, and on non-PR runs publishes the dashboard to
+`gh-pages` (set the `publish: false` input to skip that).
+
+### PR previews
+
+On pull requests the workflow uploads the rendered dashboard as an
+artifact instead of publishing. To get a clickable "View dashboard
+preview" check on the PR, also copy `.github/workflows/preview-link.yml`
+from this repo into the consuming repo and change its `workflows:` entry
+to the name of your caller workflow (`integration` above). It must be on
+the default branch to take effect.
+
+PRs also cap each package to the first few tests via the `PYTEST_LIMIT_N`
+environment variable (the `pytest-limit-n` input): the runner records the
+limit, propagates it to the test subprocesses, and the dashboard shows a
+banner. The actual truncation is done by the repo-root `conftest.py`
+(because `pytest --pyargs` collects from site-packages, the file must live
+in the repo that invokes the harness), so copy that file into the
+consuming repo as well.
+
+### Dogfooding
+
+This repo tests the package and the reusable workflow against itself:
+`.github/workflows/self-test.yml` calls the same reusable workflow with
+`package-spec: .` (the checked-out source rather than the main branch)
+and the small `example/packages.yaml`, so every push and PR here exercises
+the whole pipeline.
