@@ -1,0 +1,19 @@
+# Minimal example config, used by this repo's self-test to exercise the
+# reusable workflow end to end (matrix expansion, install, test, dashboard)
+# quickly and reliably. It also serves as a worked example of the config
+# format documented in the README. Real consumers point the workflow at
+# their own packages.yaml instead.
+
+dashboard_title: integration-dashboard self-test
+
+core_package:
+  pypi_name: packaging
+  module: packaging
+  repo_url: https://github.com/pypa/packaging.git
+
+columns:
+  - {python: "3.12", variant: stable}
+
+packages:
+  - {pypi_name: pyparsing, module: pyparsing}
+  - {pypi_name: iniconfig, module: iniconfig}
