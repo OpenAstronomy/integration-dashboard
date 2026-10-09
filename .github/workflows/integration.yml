@@ -26,6 +26,13 @@ on:
         description: On pull requests, cap each package to the first N tests.
         type: string
         default: '10'
+      apt-packages:
+        description: >-
+          Space-separated Ubuntu packages to install with apt before each
+          column runs, for packages whose builds or tests need system
+          libraries or tools (e.g. 'libfftw3-dev ffmpeg').
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -108,6 +115,16 @@ jobs:
             uv-${{ runner.os }}-${{ matrix.variant }}-${{ matrix.python }}-
             uv-${{ runner.os }}-${{ matrix.variant }}-
             uv-${{ runner.os }}-
+
+      - name: Install system packages
+        if: inputs.apt-packages != ''
+        env:
+          APT_PACKAGES: ${{ inputs.apt-packages }}
+        # $APT_PACKAGES is left unquoted on purpose so it splits into
+        # one argument per package.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $APT_PACKAGES
 
       - name: Install integration-dashboard
         run: pip install ${{ inputs.package-spec }}
