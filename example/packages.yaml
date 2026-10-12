@@ -16,4 +16,8 @@ columns:
 
 packages:
   - {pypi_name: pyparsing, module: pyparsing}
-  - {pypi_name: iniconfig, module: iniconfig}
+  # iniconfig ships no tests of its own, so it also carries the self-test's
+  # check that the `libraries` input installed FFTW (see that file).
+  - pypi_name: iniconfig
+    module: iniconfig
+    pytest_args: [example/test_system_libraries.py]
