@@ -20,3 +20,47 @@ jobs:
       config: example/packages.yaml
       package-spec: "."
       publish: true
+      # FFTW is not on the GitHub-hosted Ubuntu image. The example config
+      # runs example/test_system_libraries.py, which fails unless FFTW can
+      # be loaded from the test venv; check-results below then fails the
+      # self-test. The brew entry is ignored on the Ubuntu runner and is
+      # there so the multi-manager format is parsed too.
+      libraries: |
+        apt: [libfftw3-double3]
+        brew: [fftw]
+
+  # The harness records failures in the results instead of failing the job,
+  # so check them here: every example package must install and its tests
+  # (including the system-library check) must pass or be absent.
+  check-results:
+    needs: integration
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: results-*
+          merge-multiple: true
+          path: results/
+
+      - name: Check every example package installed and passed
+        run: |
+          python3 -c '
+          import glob, json, sys
+          files = sorted(glob.glob("results/*.json"))
+          if not files:
+              sys.exit("no results files found")
+          problems = []
+          for path in files:
+              data = json.load(open(path))
+              for pkg in data["packages"]:
+                  install = pkg.get("install_status")
+                  test = pkg.get("test_status")
+                  name = pkg["name"]
+                  print(f"{path}: {name}: {install}, {test}")
+                  if install != "installed" or test not in ("pass", "no-tests"):
+                      problems.append(f"{path}: {name} ({install}, {test})")
+          if problems:
+              sys.exit("failing example packages:\n" + "\n".join(problems))
+          '

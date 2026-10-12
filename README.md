@@ -167,6 +167,22 @@ The reusable workflow reads `columns:` from your config to build the
 matrix, runs every column, and on non-PR runs publishes the dashboard to
 `gh-pages` (set the `publish: false` input to skip that).
 
+If some packages need system libraries or tools to build or run their
+tests, list them in the `libraries` input and they are installed before
+each column runs. It takes the same format as the OpenAstronomy tox
+workflow: a mapping from package manager (`apt`, `brew`, `brew-cask` or
+`choco`) to a list of packages. Columns currently all run on Ubuntu, so
+only the `apt` list is used for now:
+
+```yaml
+    with:
+      config: packages.yaml
+      libraries: |
+        apt:
+          - libfftw3-dev
+          - ffmpeg
+```
+
 ### PR previews
 
 On pull requests the workflow uploads the rendered dashboard as an
