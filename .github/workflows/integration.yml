@@ -26,11 +26,14 @@ on:
         description: On pull requests, cap each package to the first N tests.
         type: string
         default: '10'
-      apt-packages:
+      libraries:
         description: >-
-          Space-separated Ubuntu packages to install with apt before each
-          column runs, for packages whose builds or tests need system
-          libraries or tools (e.g. 'libfftw3-dev ffmpeg').
+          System packages to install before each column runs, for packages
+          whose builds or tests need system libraries or tools. A YAML
+          mapping from package manager (apt, brew, brew-cask, choco) to a
+          list of packages, in the same format as the OpenAstronomy tox
+          workflow, e.g. '{apt: [libfftw3-dev, ffmpeg]}'. Only the lists
+          for the runner's own package manager are used.
         type: string
         default: ''
 
@@ -52,6 +55,10 @@ jobs:
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.columns.outputs.matrix }}
+      libraries-apt: ${{ steps.libraries.outputs.apt }}
+      libraries-brew: ${{ steps.libraries.outputs.brew }}
+      libraries-brew-cask: ${{ steps.libraries.outputs.brew-cask }}
+      libraries-choco: ${{ steps.libraries.outputs.choco }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -70,6 +77,35 @@ jobs:
           cols = yaml.safe_load(open(os.environ["CONFIG"]))["columns"]
           matrix = [{"python": str(c["python"]), "variant": c["variant"]} for c in cols]
           print("matrix=" + json.dumps(matrix))
+          ' >> "$GITHUB_OUTPUT"
+
+      # Turn the `libraries` input into one space-separated list per
+      # package manager. install-package pastes these lists straight into
+      # shell commands, so every name is checked against a conservative
+      # character set first.
+      - name: Parse system libraries
+        id: libraries
+        env:
+          LIBRARIES: ${{ inputs.libraries }}
+        run: |
+          python -c '
+          import os, re, sys, yaml
+          managers = ["apt", "brew", "brew-cask", "choco"]
+          raw = yaml.safe_load(os.environ["LIBRARIES"]) or {}
+          if not isinstance(raw, dict):
+              sys.exit(f"libraries must be a mapping of package manager to packages, got {raw!r}")
+          unknown = set(raw) - set(managers)
+          if unknown:
+              sys.exit(f"unknown package managers in libraries: {sorted(unknown)}; expected one of {managers}")
+          for manager in managers:
+              packages = raw.get(manager) or []
+              if isinstance(packages, str):
+                  packages = packages.split()
+              for package in packages:
+                  if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_@:/=-]*", str(package)):
+                      sys.exit(f"invalid {manager} package name: {package!r}")
+              joined = " ".join(map(str, packages))
+              print(f"{manager}={joined}")
           ' >> "$GITHUB_OUTPUT"
 
   variant:
@@ -116,15 +152,15 @@ jobs:
             uv-${{ runner.os }}-${{ matrix.variant }}-
             uv-${{ runner.os }}-
 
+      # Installs only the list for this runner's package manager, and
+      # skips itself entirely when that list is empty.
       - name: Install system packages
-        if: inputs.apt-packages != ''
-        env:
-          APT_PACKAGES: ${{ inputs.apt-packages }}
-        # $APT_PACKAGES is left unquoted on purpose so it splits into
-        # one argument per package.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y $APT_PACKAGES
+        uses: ConorMacBride/install-package@3e7ad059e07782ee54fa35f827df52aae0626f30  # v1.1.0
+        with:
+          apt: ${{ needs.setup.outputs.libraries-apt }}
+          brew: ${{ needs.setup.outputs.libraries-brew }}
+          brew-cask: ${{ needs.setup.outputs.libraries-brew-cask }}
+          choco: ${{ needs.setup.outputs.libraries-choco }}
 
       - name: Install integration-dashboard
         run: pip install ${{ inputs.package-spec }}
