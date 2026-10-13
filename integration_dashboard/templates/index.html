@@ -11,14 +11,25 @@
 </div>
 {% endif %}
 
+{% if constraints %}
+<div class="banner">
+  <strong>Constraints:</strong> these dependencies are temporarily held below
+  their latest version, so the affected columns do not test the true latest.
+  <ul>
+  {% for c in constraints %}
+    <li><code>{{ c.spec }}</code>{% if c.variants != all_variants %} ({{ c.variants|join(", ") }} only){% endif %}: {{ c.reason }}</li>
+  {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
 <table class="meta-table">
-<thead><tr><th>Python</th><th>Variant</th><th>{{ core_name }}</th><th>Started</th><th>Finished</th></tr></thead>
+<thead><tr><th>Python</th><th>Variant</th><th>Started</th><th>Finished</th></tr></thead>
 <tbody>
 {% for v in variants_meta %}
 <tr>
   <td><code>{{ v.python }}</code></td>
   <td><code>{{ v.variant }}</code></td>
-  <td>{% if v.has_data %}{{ v.core_version }}{% if v.extra_index_urls %} <small style="color:#999">(nightly)</small>{% endif %}{% else %}-{% endif %}</td>
   <td>{% if v.has_data %}{{ v.started_at }}{% else %}-{% endif %}</td>
   <td>{% if v.has_data %}{{ v.finished_at or "(in progress)" }}{% else %}-{% endif %}</td>
 </tr>
@@ -68,11 +79,11 @@
   <span class="pill fail">fail</span>
   <span class="pill timeout">timeout</span>
   <span class="pill no-tests">no tests</span>
-  <span class="pill skipped">skipped</span>
+  <span class="pill held-back">held back</span>
   <span class="pill install-fail">install fail</span>
   <span class="pill missing">missing</span>
 </div>
-<p class="legend"><strong>skipped</strong>: resolver couldn't satisfy this package alongside the rest of the venv. <strong>install fail</strong>: install step crashed for some other reason (build error, etc.).</p>
+<p class="legend"><strong>held back</strong>: the package only installs with an older version of some dependency than the latest available, so it was not tested; its log names the dependency. <strong>install fail</strong>: the package could not be resolved at all, or its install failed (build error, etc.).</p>
 
 {% if failures %}
 <h2>Failure logs</h2>
@@ -100,7 +111,7 @@
 
 {% if variants_meta|selectattr("installed_deps")|list %}
 <h2>Installed packages</h2>
-<p class="legend">Full <code>uv pip freeze</code> of the shared venv for each variant that ran.</p>
+<p class="legend">Everything installed in the shared venv for each variant that ran.</p>
 {% for v in variants_meta %}
 {% if v.installed_deps %}
 <details>

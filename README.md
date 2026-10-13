@@ -3,10 +3,9 @@ integration-dashboard
 
 A small, ecosystem-agnostic harness for running cross-package integration
 tests and publishing the results as a single-page dashboard. You point it
-at a config file describing an ecosystem's core package and the packages
-that depend on it, and it installs everything together into a shared
-virtual environment, runs each package's test suite, and renders an
-HTML matrix of the outcomes.
+at a config file listing an ecosystem's packages, and it installs them
+together into a shared virtual environment, runs each package's test
+suite, and renders an HTML matrix of the outcomes.
 
 The goal is to catch problems that only appear when many packages from an
 ecosystem are installed together, which each package's own CI cannot see.
@@ -34,20 +33,28 @@ How it works
 A run is organised as a matrix of *columns*. Each column is one
 independent `(python, variant)` pair (the two axes are not a cross-product,
 so you can test e.g. `3.12 + stable`, `3.13 + pre` and `3.14 + dev`). The
-three variants control how the latest version of each package is chosen:
+variant applies to every listed package:
 
-| Variant  | Core package                                          | Each package                           |
-|----------|-------------------------------------------------------|----------------------------------------|
-| `stable` | Latest non-pre-release on PyPI                        | Latest non-pre-release on PyPI         |
-| `pre`    | Latest including pre-releases (`--prerelease=allow`)  | Latest including pre-releases          |
-| `dev`    | Latest dev wheel from `core_package.dev_index_urls` (or `git+repo_url` if unset) | `git+<repo_url>` (HEAD of the default branch) |
+| Variant  | Each listed package                                                        |
+|----------|----------------------------------------------------------------------------|
+| `stable` | Latest release                                                             |
+| `pre`    | Latest release or pre-release                                              |
+| `dev`    | Nightly wheel from `dev_index_urls` if one exists, otherwise `git+<repo_url>` |
 
-Within each column a single shared venv is built: the core package is
-installed first, then each package one at a time. If a package cannot be
-installed alongside the existing venv (for example it pins an older version
-of something already installed), it is skipped and recorded; the rest of
-the venv is untouched. After the installs, `pytest --pyargs <module>` runs
-for each package that installed successfully. Each column writes
+In `pre` and `dev` columns, dependencies may also come from pre-releases, and
+in `dev` columns from the `dev_index_urls` too.
+
+Within each column all listed packages share one venv, and no package may
+drag a shared dependency down for the others. Each listed package is first
+resolved on its own. Then, for every listed package and every direct
+dependency of a listed package, the highest version any of those
+resolutions reached becomes a minimum, and each package is resolved again
+with those minimums. A package that only works with an older version of
+something another package uses is reported as *held back*, with uv's
+explanation of which dependency is involved, and is not installed or
+tested. Dependencies further down the tree are left to uv, since their caps
+come from packages outside the list. The remaining packages are installed,
+and `pytest --pyargs <module>` runs for each one. Each column writes
 `results/<variant>__<python>.json`, and the dashboard step reads those JSON
 files and renders `site/index.html`.
 
@@ -65,7 +72,7 @@ integration-dashboard run --variant stable --python 3.12
 integration-dashboard run --variant stable --packages foo,bar
 
 # Restrict to a subset of tiers (default: all tiers):
-integration-dashboard run --tiers core
+integration-dashboard run --tiers coordinated
 
 # Build the dashboard from whatever results/*.json files exist:
 integration-dashboard dashboard
@@ -79,26 +86,7 @@ Configuration
 -------------
 
 Everything ecosystem-specific lives in a YAML config (conventionally
-`packages.yaml`) with four top-level keys.
-
-`core_package` is the package installed into the shared venv before
-everything else:
-
-```yaml
-core_package:
-  pypi_name: mycore
-  module: mycore                # defaults to pypi_name
-  repo_url: https://github.com/example/mycore.git   # used by the dev variant
-  # dev variant: install nightly wheels from these indexes; omit to install
-  # the dev version from git+repo_url instead.
-  dev_index_urls:
-    - https://pypi.example.org/mycore-nightly/simple
-  # Optional pytest plugins shared across the ecosystem, installed into the
-  # venv alongside pytest (e.g. a plugin that registers a marker so the
-  # matching tests are skipped rather than run).
-  test_deps:
-    - pytest-someplugin
-```
+`packages.yaml`).
 
 `columns` is the list of `(python, variant)` pairs to test; each becomes one
 dashboard column. Python versions use uv notation, so `"3.14t"` is the
@@ -117,7 +105,7 @@ entry takes:
 
 - `pypi_name` (the package's name on PyPI; also the row label)
 - `module` (the top-level import name, for `pytest --pyargs`; defaults to `pypi_name`)
-- `repo_url` (for the `dev` variant install)
+- `repo_url` (built from in `dev` columns when no nightly wheel exists)
 - `tier` (optional label used for grouping/ordering and the `--tiers` filter;
   tiers are ordered by first appearance in the list, and entries with no
   tier share a single unlabelled group)
@@ -125,10 +113,39 @@ entry takes:
 - `extra_deps` (optional list of extra packages to add to the install)
 - `pytest_args` (optional list passed through to pytest; use `-k "not foo"` to skip tests)
 
-`dashboard_title` (optional) sets the dashboard heading.
+`dev_index_urls` (optional) lists extra package indexes, such as nightly
+wheel channels, that `dev` columns use for any package they host:
 
-To retarget the harness at a different ecosystem, point `core_package` at
-that ecosystem's core package and replace the `packages` list.
+```yaml
+dev_index_urls:
+  - https://pypi.example.org/nightly/simple
+```
+
+`test_deps` (optional) lists pytest plugins installed alongside pytest in
+every column, for example a plugin that registers a marker so the matching
+tests are skipped rather than run:
+
+```yaml
+test_deps:
+  - pytest-someplugin
+```
+
+`constraints` (optional) temporarily holds back dependencies that are not
+themselves listed, for example when their latest release is broken or two
+of them cannot coexist. Each entry needs a `spec` and a `reason`, and can be
+limited to some `variants`. Constraints may not name a listed package, and
+the dashboard shows them in a banner:
+
+```yaml
+constraints:
+  - spec: docutils<0.23
+    reason: sphinx does not support docutils 0.23 yet
+  - spec: numpy!=2.5.0; python_version >= "3.14"
+    reason: numpy 2.5.0 has no wheels for Python 3.14
+    variants: [stable, pre]
+```
+
+`dashboard_title` (optional) sets the dashboard heading.
 
 Continuous integration (reusable workflow)
 ------------------------------------------

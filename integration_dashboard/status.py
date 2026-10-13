@@ -6,15 +6,15 @@ dashboard) use these constants and helpers, so the strings are defined
 in exactly one place.
 """
 
-# The recognised core-package variants. Listed once here so both
-# scripts (and config validation) agree.
+# The recognised variants. Listed once here so both scripts (and config
+# validation) agree.
 VARIANTS = ("stable", "pre", "dev")
 
 # install_status values, used in results/<variant>.json
 INSTALLED = "installed"
-SKIPPED = "skipped"  # resolver couldn't satisfy alongside the existing venv
-INSTALL_FAIL = "install-fail"  # install itself crashed (build error, network, etc.)
-NO_SPEC = "no-spec"  # couldn't build an install spec (no repo_url / no PyPI release)
+HELD_BACK = "held-back"  # only installable with an older version of a dependency
+INSTALL_FAIL = "install-fail"  # can't be resolved at all, or the install itself failed
+NO_SPEC = "no-spec"  # dev column, but no nightly wheel and no repo_url to build from
 
 # test_status values
 PASS = "pass"
@@ -26,7 +26,7 @@ TIMEOUT = "timeout"
 # Tabular maps used on the per-variant page.
 INSTALL_BADGE = {
     INSTALLED: {"status": "pass", "label": "installed"},
-    SKIPPED: {"status": "skipped", "label": "skipped"},
+    HELD_BACK: {"status": "held-back", "label": "held back"},
     INSTALL_FAIL: {"status": "install-fail", "label": "install fail"},
     NO_SPEC: {"status": "missing", "label": "no spec"},
     "": {"status": "missing", "label": "-"},
