@@ -169,8 +169,10 @@ and the "after" venv is built from the same lock with only the changed package
 swapped. The individual test results are then compared, so the report lists
 the tests that newly fail even when a downstream package already has failing
 tests of its own. Results go to `compare-results/<package>.json` and a Markdown
-report to `compare-report.md`, and the command exits non-zero if anything newly
-fails.
+summary table to `compare-report.md`, and the command exits non-zero if anything
+newly fails. The names and messages of the newly failing tests, and any install
+errors, are printed in the command's output rather than the report, so in CI they
+are in each package's job log, which the report links to.
 
 The `compare.yml` reusable workflow runs one job per downstream package and
 writes the report to the job summary (and uploads it as the `compare-report`

@@ -122,7 +122,7 @@ def compare_package(
         "changed": changed,
         "before": {"spec": before},
         "after": {"spec": after},
-        "newly_failing": {},
+        "newly_failing": [],
         "newly_passing": [],
     }
     reqs = run._requirements(pkg, variant, nightly=set())
@@ -161,7 +161,8 @@ def compare_package(
         )
         if proc.returncode != 0:
             result["before"]["install_error"] = proc.stderr or proc.stdout
-            print("  could not resolve the before environment")
+            print("  could not resolve the before environment:")
+            print(result["before"]["install_error"])
             return result
         lock = proc.stdout
         changed_key = canonicalize_name(changed)
@@ -179,7 +180,7 @@ def compare_package(
             error = side.build(requirements_text)
             if error:
                 result[label]["install_error"] = error
-                print(f"  {label} venv failed to install")
+                print(f"  {label} venv failed to install:\n{error}")
                 continue
             installed = run._installed(side.python)
             result[label]["changed_version"] = installed.get(changed_key, "")
@@ -212,19 +213,26 @@ def compare_package(
 
         if "outcomes" in result["before"] and "outcomes" in result["after"]:
             old, new = result["before"]["outcomes"], result["after"]["outcomes"]
-            result["newly_failing"] = {
-                test: result["after"]["messages"].get(test, "")
+            result["newly_failing"] = sorted(
+                test
                 for test, outcome in new.items()
                 if outcome in BROKEN and old.get(test) not in BROKEN
-            }
+            )
             result["newly_passing"] = sorted(
                 test
                 for test, outcome in new.items()
                 if outcome == "passed" and old.get(test) in BROKEN
             )
-            print(
-                f"  newly failing: {len(result['newly_failing'])}, newly passing: {len(result['newly_passing'])}"
-            )
+            # The details go to the log only; the report just has the counts.
+            print(f"  newly failing: {len(result['newly_failing'])}")
+            for test in result["newly_failing"]:
+                print(f"    {test}")
+                message = result["after"]["messages"].get(test, "").strip()
+                if message:
+                    print("      " + message.replace("\n", "\n      "))
+            print(f"  newly passing: {len(result['newly_passing'])}")
+            for test in result["newly_passing"]:
+                print(f"    {test}")
         # Keep the JSON small: the per-test outcomes were only needed for the diff.
         for label in ("before", "after"):
             result[label].pop("outcomes", None)
@@ -242,7 +250,10 @@ def _regressed(result):
     )
 
 
-def _summary_cell(side):
+def _summary_cell(result, label):
+    side = result[label]
+    if result.get("error"):
+        return "not tested"
     if "install_error" in side:
         return "install failed"
     if "counts" not in side:
@@ -255,59 +266,44 @@ def _summary_cell(side):
 
 
 def render_report(results):
-    """Markdown summary of every compared package."""
+    """Markdown summary table of every compared package.
+
+    Which tests newly fail, and why, is left to the log of each package's run.
+    """
     if not results:
         return "No packages were compared.\n"
     first = results[0]
+    regressed = [r for r in results if _regressed(r)]
     lines = [
         f"## Downstream tests: `{first['changed']}` before and after",
         "",
         f"- before: `{first['before']['spec']}`",
         f"- after: `{first['after']['spec']}`",
         "",
-    ]
-    regressed = [r for r in results if _regressed(r)]
-    lines.append(
         f"**{len(regressed)} of {len(results)} packages have new failures.**"
         if regressed
-        else f"**No new failures in {len(results)} packages.**"
-    )
-    lines += [
+        else f"**No new failures in {len(results)} packages.**",
         "",
         "| Package | Before | After | Newly failing | Newly passing |",
         "|---|---|---|---|---|",
     ]
     for r in results:
-        name = f"{r['name']} {r['after'].get('version') or r['before'].get('version', '')}".strip()
+        version = r["after"].get("version") or r["before"].get("version", "")
+        failing = len(r["newly_failing"])
         lines.append(
-            f"| {name} | {_summary_cell(r['before'])} | {_summary_cell(r['after'])} "
-            f"| {len(r['newly_failing']) or ''} | {len(r['newly_passing']) or ''} |"
+            f"| {r['name']} {version} | {_summary_cell(r, 'before')} "
+            f"| {_summary_cell(r, 'after')} | {f'**{failing}**' if failing else ''} "
+            f"| {len(r['newly_passing']) or ''} |"
         )
-    for r in results:
-        details = []
-        if r["newly_failing"]:
-            for test, message in sorted(r["newly_failing"].items()):
-                details.append(f"- `{test}`")
-                if message:
-                    details.append(
-                        "  ```\n  " + message.strip().replace("\n", "\n  ") + "\n  ```"
-                    )
-        for label in ("before", "after"):
-            if "install_error" in r[label]:
-                details.append(
-                    f"{label} venv failed to install:\n```\n{r[label]['install_error'][-3000:].strip()}\n```"
-                )
-        if r.get("error"):
-            details.append(r["error"])
-        if details:
-            lines += [
-                "",
-                f"<details><summary>{r['name']}</summary>",
-                "",
-                *details,
-                "",
-                "</details>",
-            ]
+    run_url = "{GITHUB_SERVER_URL}/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}"
+    try:
+        where = f"the [workflow run]({run_url.format(**os.environ)})"
+    except KeyError:
+        where = "the output of `integration-dashboard compare`"
+    lines += [
+        "",
+        f"The failing tests and install errors for each package are in {where}.",
+    ]
     return "\n".join(lines) + "\n"
 
 
