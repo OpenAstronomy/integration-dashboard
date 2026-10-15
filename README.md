@@ -147,6 +147,53 @@ constraints:
 
 `dashboard_title` (optional) sets the dashboard heading.
 
+Comparing before and after a change
+-----------------------------------
+
+`integration-dashboard compare` answers a narrower question than the
+dashboard: did a change to one package, typically a pull request, break any
+of the packages that depend on it? It reuses the same config, but tests each
+downstream package on its own rather than in a shared venv:
+
+```bash
+integration-dashboard compare --package astropy \
+    --before git+https://github.com/astropy/astropy@<base commit> \
+    --after /path/to/astropy-checkout \
+    --tiers coordinated
+```
+
+`--before` and `--after` are pip URLs or local paths for the changed package.
+For each downstream package, the "before" venv is resolved and locked (git
+installs are locked to a commit, so both runs test the same downstream code),
+and the "after" venv is built from the same lock with only the changed package
+swapped. The individual test results are then compared, so the report lists
+the tests that newly fail even when a downstream package already has failing
+tests of its own. Results go to `compare-results/<package>.json` and a Markdown
+report to `compare-report.md`, and the command exits non-zero if anything newly
+fails.
+
+The `compare.yml` reusable workflow runs one job per downstream package and
+writes the report to the job summary (and uploads it as the `compare-report`
+artifact). For example, in the changed package's repository:
+
+```yaml
+name: downstream
+on:
+  pull_request:
+    types: [labeled, synchronize]
+jobs:
+  compare:
+    if: contains(github.event.pull_request.labels.*.name, 'needs-downstream-testing')
+    uses: OpenAstronomy/integration-dashboard/.github/workflows/compare.yml@main
+    with:
+      config-repository: astropy/astropy-integration-testing
+      package: astropy
+      # The PR's test merge commit is its base commit plus the PR's changes.
+      before: git+https://github.com/astropy/astropy@${{ github.event.pull_request.base.sha }}
+      after: git+https://github.com/astropy/astropy@${{ github.event.pull_request.merge_commit_sha }}
+      tiers: coordinated
+```
+
 Continuous integration (reusable workflow)
 ------------------------------------------
 

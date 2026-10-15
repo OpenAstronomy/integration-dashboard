@@ -369,47 +369,9 @@ def run_variant(
         }
         for name, entry in to_test:
             print(f"\nTesting {entry['name']}...")
-            cmd = [
-                python,
-                "-m",
-                "pytest",
-                "--pyargs",
-                entry["module"],
-                *pytest_args[name],
-            ]
-            cmd += ["--timeout=120", "-q", "--tb=line", "--no-header"]
-            env = {**os.environ, "MPLBACKEND": "Agg", "DISPLAY": ""}
-            start = time.time()
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeouts["test"],
-                    cwd=repo_root,
-                    env=env,
-                )
-            except subprocess.TimeoutExpired:
-                entry["test_status"] = status.TIMEOUT
-                entry["test_output"] = "timeout"
-                entry["duration"] = round(time.time() - start, 1)
-                print(f"  timeout after {entry['duration']}s")
-                continue
-            entry["duration"] = round(time.time() - start, 1)
-            out = proc.stdout
-            if proc.stderr:
-                out += "\n--- stderr ---\n" + proc.stderr
-            entry["test_output"] = out
-
-            no_module = proc.returncode == 4 and "module or package not found" in (
-                proc.stdout + proc.stderr
+            entry["test_status"], entry["test_output"], entry["duration"] = run_tests(
+                python, entry["module"], pytest_args[name], repo_root, timeouts["test"]
             )
-            if proc.returncode == 5 or no_module:
-                entry["test_status"] = status.NO_TESTS
-            elif proc.returncode == 0:
-                entry["test_status"] = status.PASS
-            else:
-                entry["test_status"] = status.FAIL
             print(f"  {entry['test_status']} in {entry['duration']}s")
 
     finally:
@@ -419,6 +381,34 @@ def run_variant(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     return result, out_path
+
+
+def run_tests(python, module, pytest_args, repo_root, timeout, junit_path=None):
+    """Run one package's tests with ``pytest --pyargs``.
+
+    Runs from ``repo_root`` so the consuming repo's ``conftest.py`` applies.
+    Returns (test_status, output, duration in seconds).
+    """
+    cmd = [python, "-m", "pytest", "--pyargs", module, *pytest_args]
+    cmd += ["--timeout=120", "-q", "--tb=line", "--no-header"]
+    if junit_path:
+        cmd.append(f"--junitxml={junit_path}")
+    env = {**os.environ, "MPLBACKEND": "Agg", "DISPLAY": ""}
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=repo_root, env=env
+        )
+    except subprocess.TimeoutExpired:
+        return status.TIMEOUT, "timeout", round(time.time() - start, 1)
+    duration = round(time.time() - start, 1)
+    out = proc.stdout
+    if proc.stderr:
+        out += "\n--- stderr ---\n" + proc.stderr
+    no_module = proc.returncode == 4 and "module or package not found" in out
+    if proc.returncode == 5 or no_module:
+        return status.NO_TESTS, out, duration
+    return (status.PASS if proc.returncode == 0 else status.FAIL), out, duration
 
 
 def _sort_by_tier(packages):
