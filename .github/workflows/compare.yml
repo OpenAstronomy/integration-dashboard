@@ -121,8 +121,8 @@ jobs:
           PACKAGE_SPEC: ${{ inputs.package-spec }}
         run: pip install "$PACKAGE_SPEC"
 
-      # Writes this package's report to the job summary; the job fails if
-      # the package has new failures.
+      # Fails if the package has new failures; the tracebacks and a summary
+      # line are in the log.
       - name: Compare ${{ matrix.package }}
         env:
           CONFIG: ${{ inputs.config }}
@@ -133,9 +133,6 @@ jobs:
           PYTHON: ${{ inputs.python }}
           DOWNSTREAM: ${{ matrix.package }}
         run: |
-          status=0
           integration-dashboard compare --config "$CONFIG" --package "$CHANGED" \
             --before "$BEFORE" --after "$AFTER" --packages "$DOWNSTREAM" \
-            --variant "$VARIANT" --python "$PYTHON" || status=$?
-          cat compare-report.md >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
+            --variant "$VARIANT" --python "$PYTHON"

@@ -168,17 +168,15 @@ downstream package is tested against the same build of its current contents.
 For each downstream package, the "before" venv is resolved and locked (git
 installs are locked to a commit, so both runs test the same downstream code),
 and the "after" venv is built from the same lock with only the changed package
-swapped. The individual test results are then compared, so the report lists
+swapped. The individual test results are then compared, so the output lists
 the tests that newly fail even when a downstream package already has failing
 tests of its own. The output shows the full traceback of every newly failing
-test (and any install errors), then a one-line summary per package. The same
-summary goes to `compare-report.md` as a Markdown table, and the command exits
-non-zero if anything newly fails.
+test (and any install errors), then a one-line summary per package, and the
+command exits non-zero if anything newly fails.
 
-The `compare.yml` reusable workflow runs one job per downstream package. Each
-job writes its package's table to the job summary and fails if the package has
-new failures; the tracebacks are in the job log. For example, in the changed
-package's repository:
+The `compare.yml` reusable workflow runs one job per downstream package, which
+fails if that package has new failures; its log ends with the tracebacks and
+the summary line. For example, in the changed package's repository:
 
 ```yaml
 name: downstream

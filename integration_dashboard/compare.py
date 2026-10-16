@@ -21,9 +21,8 @@ individual test results shows what the change broke (or fixed), even when a
 downstream package already has failing tests on its own.
 
 The output shows the full traceback of every newly failing test, then a
-one-line summary per package; ``--report`` gets the same summary as a
-Markdown table. Exits non-zero if any test newly fails, or a package that
-installed before no longer installs.
+one-line summary per package. Exits non-zero if any test newly fails, or a
+package that installed before no longer installs.
 
 Usage:
     integration-dashboard compare --package astropy \\
@@ -219,48 +218,6 @@ def _summary_line(result):
     return f"{result['name']}: {outcome} (before: {_summary_cell(before)}; after: {_summary_cell(after)})"
 
 
-def render_report(results):
-    """Markdown summary table of every compared package.
-
-    Which tests newly fail, and why, is left to the log of each package's run.
-    """
-    if not results:
-        return "No packages were compared.\n"
-    first = results[0]
-    regressed = [r for r in results if _regressed(r)]
-    lines = [
-        f"## Downstream tests: `{first['changed']}` before and after",
-        "",
-        f"- before: `{first['before']['spec']}`",
-        f"- after: `{first['after']['spec']}`",
-        "",
-        f"**{len(regressed)} of {len(results)} packages have new failures.**"
-        if regressed
-        else f"**No new failures in {len(results)} packages.**",
-        "",
-        "| Package | Before | After | Newly failing | Newly passing |",
-        "|---|---|---|---|---|",
-    ]
-    for r in results:
-        version = r["after"].get("version") or r["before"].get("version", "")
-        failing = len(r["newly_failing"])
-        lines.append(
-            f"| {r['name']} {version} | {_summary_cell(r['before'])} "
-            f"| {_summary_cell(r['after'])} | {f'**{failing}**' if failing else ''} "
-            f"| {len(r['newly_passing']) or ''} |"
-        )
-    run_url = "{GITHUB_SERVER_URL}/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}"
-    try:
-        where = f"the [workflow run]({run_url.format(**os.environ)})"
-    except KeyError:
-        where = "the output of `integration-dashboard compare`"
-    lines += [
-        "",
-        f"The failing tests and install errors for each package are in {where}.",
-    ]
-    return "\n".join(lines) + "\n"
-
-
 def add_arguments(ap):
     ap.add_argument("--config", default="packages.yaml")
     ap.add_argument(
@@ -287,7 +244,6 @@ def add_arguments(ap):
         help="How downstream packages are installed (default: dev, i.e. their main branch)",
     )
     ap.add_argument("--python", default="3.12")
-    ap.add_argument("--report", default="compare-report.md")
     ap.add_argument("--timeout-install", type=int, default=900)
     ap.add_argument("--timeout-test", type=int, default=1800)
 
@@ -337,7 +293,5 @@ def run_compare(args):
     print("\n===== Summary =====")
     for result in results:
         print(_summary_line(result))
-    Path(args.report).write_text(render_report(results))
-    print(f"\nWrote {args.report}")
     if any(_regressed(r) for r in results):
         sys.exit(1)
