@@ -48,7 +48,7 @@ on:
       package-spec:
         description: pip install target for the integration-dashboard package itself.
         type: string
-        default: git+https://github.com/OpenAstronomy/integration-dashboard@main
+        default: git+https://github.com/astrofrog/integration-dashboard@compare-command
 
 permissions:
   contents: read
