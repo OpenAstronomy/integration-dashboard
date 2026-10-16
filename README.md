@@ -175,8 +175,8 @@ errors, are printed in the command's output rather than the report, so in CI the
 are in each package's job log, which the report links to.
 
 The `compare.yml` reusable workflow runs one job per downstream package and
-writes the report to the job summary (and uploads it as the `compare-report`
-artifact). For example, in the changed package's repository:
+writes the report to the job summary. For example, in the changed package's
+repository:
 
 ```yaml
 name: downstream

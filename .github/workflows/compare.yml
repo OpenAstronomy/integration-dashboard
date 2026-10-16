@@ -174,12 +174,3 @@ jobs:
           integration-dashboard compare --report-only --package "$CHANGED" || status=$?
           cat compare-report.md >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
-
-      # Kept as an artifact so a caller-side workflow_run job can post it
-      # as a pull request comment.
-      - name: Upload the report
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: compare-report
-          path: compare-report.md
