@@ -16,7 +16,7 @@ tr.tier-header th { background: #eef2f6; text-align: left; font-weight: 600;
 .pill.pass { background: #dcffe4; color: #22863a; }
 .pill.fail { background: #ffdce0; color: #cb2431; }
 .pill.no-tests { background: #eef2f6; color: #6a737d; }
-.pill.skipped { background: #e6e9ee; color: #6a737d; font-style: italic; }
+.pill.held-back { background: #e6e9ee; color: #6a737d; font-style: italic; }
 .pill.install-fail { background: #fff1d6; color: #b08000; }
 .pill.timeout { background: #ece2ff; color: #5b3fb8; }
 .pill.missing { background: #f1f1f1; color: #999; }
@@ -46,7 +46,7 @@ nav { margin-bottom: 1.5em; font-size: 0.9em; }
   .pill.pass        { background: #0a3a17; color: #3fb950; }
   .pill.fail        { background: #4a1216; color: #f85149; }
   .pill.no-tests    { background: #21262d; color: #8b949e; }
-  .pill.skipped     { background: #21262d; color: #8b949e; }
+  .pill.held-back   { background: #21262d; color: #8b949e; }
   .pill.install-fail{ background: #3d2900; color: #e3b341; }
   .pill.timeout     { background: #261c4a; color: #a371f7; }
   .pill.missing     { background: #161b22; color: #6e7681; }

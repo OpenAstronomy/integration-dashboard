@@ -6,15 +6,11 @@
 
 dashboard_title: integration-dashboard self-test
 
-core_package:
-  pypi_name: packaging
-  module: packaging
-  repo_url: https://github.com/pypa/packaging.git
-
 columns:
   - {python: "3.12", variant: stable}
 
 packages:
+  - {pypi_name: packaging, module: packaging, repo_url: "https://github.com/pypa/packaging.git"}
   - {pypi_name: pyparsing, module: pyparsing}
   # iniconfig ships no tests of its own, so it also carries the self-test's
   # check that the `libraries` input installed FFTW (see that file).

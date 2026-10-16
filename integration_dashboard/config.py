@@ -1,14 +1,20 @@
 """Load and validate the integration-testing config (``packages.yaml``).
 
-The config has three top-level keys:
+Top-level keys:
 
-  - ``core_package``: the ecosystem's core package, installed into the
-    shared venv before anything else. Point it at a different package to
-    retarget the whole harness at another ecosystem.
-  - ``columns``: a flat list of ``{python, variant}`` pairs. Each one
-    is a single run and a single dashboard column; Python version and
-    variant are fully decoupled.
-  - ``packages``: the per-package list (one entry = one dashboard row).
+  - ``columns``: a flat list of ``{python, variant}`` pairs. Each one is a
+    single run and a single dashboard column.
+  - ``packages``: the packages to install and test together (one entry =
+    one dashboard row). Every listed package follows the column's variant.
+  - ``dev_index_urls`` (optional): extra package indexes, such as nightly
+    wheel channels, used by ``dev`` columns for any package they host.
+  - ``test_deps`` (optional): pytest plugins installed alongside pytest in
+    every column, for example one that registers a marker the packages'
+    tests use.
+  - ``constraints`` (optional): temporary limits on dependencies that are
+    not themselves listed, each with a ``spec``, a ``reason`` and
+    optionally the ``variants`` it applies to.
+  - ``dashboard_title`` (optional): the dashboard heading.
 
 Both ``run`` and ``dashboard`` read this file, so the parsing and
 validation live here in one place.
@@ -17,28 +23,30 @@ validation live here in one place.
 from pathlib import Path
 
 import yaml
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 
 from . import status
 
 
 def _load(path):
-    return yaml.safe_load(Path(path).read_text()) or {}
+    data = yaml.safe_load(Path(path).read_text()) or {}
+    if "core_package" in data:
+        raise ValueError(
+            f"{path}: 'core_package' is no longer supported; list that package "
+            "under 'packages' and move its 'dev_index_urls' and 'test_deps' to "
+            "the top level"
+        )
+    return data
 
 
 def load_packages(path):
-    return list(_load(path).get("packages", []))
-
-
-def load_core_package(path):
-    """Return the validated ``core_package`` block.
-
-    ``module`` defaults to ``pypi_name`` when not given.
-    """
-    core = _load(path).get("core_package") or {}
-    if not core.get("pypi_name"):
-        raise ValueError(f"{path}: 'core_package.pypi_name' is required")
-    core.setdefault("module", core["pypi_name"])
-    return core
+    packages = list(_load(path).get("packages") or [])
+    for i, pkg in enumerate(packages):
+        if not pkg.get("pypi_name"):
+            raise ValueError(f"{path}: packages[{i}] needs a 'pypi_name'")
+        pkg.setdefault("module", pkg["pypi_name"])
+    return packages
 
 
 def load_columns(path):
@@ -63,6 +71,47 @@ def load_columns(path):
     if not columns:
         raise ValueError(f"{path}: at least one entry under 'columns' is required")
     return columns
+
+
+def load_constraints(path):
+    """Return the validated ``constraints`` list.
+
+    Each entry is ``{spec, reason, variants}``. A constraint may not name a
+    listed package: listed packages always follow their column's variant.
+    """
+    listed = {canonicalize_name(p["pypi_name"]) for p in load_packages(path)}
+    constraints = []
+    for i, entry in enumerate(_load(path).get("constraints") or []):
+        spec = entry.get("spec")
+        if not spec or not entry.get("reason"):
+            raise ValueError(f"{path}: constraints[{i}] needs a 'spec' and a 'reason'")
+        try:
+            name = canonicalize_name(Requirement(spec).name)
+        except InvalidRequirement as exc:
+            raise ValueError(f"{path}: constraints[{i}]: {exc}") from None
+        if name in listed:
+            raise ValueError(
+                f"{path}: constraints[{i}] constrains '{name}', which is a listed "
+                "package; constraints may only apply to unlisted dependencies"
+            )
+        variants = entry.get("variants") or list(status.VARIANTS)
+        unknown = set(variants) - set(status.VARIANTS)
+        if unknown:
+            raise ValueError(
+                f"{path}: constraints[{i}] has unknown variants {sorted(unknown)}"
+            )
+        constraints.append(
+            {"spec": spec, "reason": entry["reason"], "variants": list(variants)}
+        )
+    return constraints
+
+
+def load_dev_index_urls(path):
+    return list(_load(path).get("dev_index_urls") or [])
+
+
+def load_test_deps(path):
+    return list(_load(path).get("test_deps") or [])
 
 
 def load_dashboard_title(path):

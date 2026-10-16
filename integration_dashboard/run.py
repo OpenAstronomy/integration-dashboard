@@ -1,25 +1,36 @@
 """Run one or more columns of the ecosystem integration matrix.
 
-Creates a single shared venv, installs the core package first then
-each package from packages.yaml in order, recording per-package
-install outcome (installed / skipped / install-fail / no-spec). Each
-install is constrained so it can never downgrade a package already in
-the venv; a package needing an older version is reported as skipped.
-Then runs `pytest --pyargs <module>` for each successfully-installed
-package. Writes results/<variant>__<python>.json with the full venv
-freeze and per-package data.
+Every listed package follows the column's variant:
 
-A "column" is one (python, variant) pair from the config; the two
-axes are independent (see `columns:` in packages.yaml). `--variant`
-and `--python` narrow the configured columns down to a subset.
+  - stable: latest release
+  - pre: latest release or pre-release
+  - dev: a nightly wheel from ``dev_index_urls`` if one is available,
+    otherwise the HEAD of the package's ``repo_url``
+
+All listed packages share one venv, and no package may drag a shared
+dependency down for the others. Each listed package is first resolved on
+its own. Then, for every listed package and every direct dependency of a
+listed package, the highest version any of those resolutions reached
+becomes a minimum, and each package is resolved again with those
+minimums. A package that resolves on its own but not with the minimums
+needs an older version of something another package uses, so it is
+reported as held back, with uv's explanation, and is not installed.
+Dependencies further down the tree are left to uv, since their caps come
+from packages outside the list. The config's ``constraints`` apply
+throughout. The remaining packages are installed into one
+shared venv and each is tested with ``pytest --pyargs <module>``.
+
+Each column writes results/<variant>__<python>.json.
+
+A "column" is one (python, variant) pair from the config; ``--variant``
+and ``--python`` narrow the configured columns down to a subset.
 
 Usage:
     integration-dashboard run                                    # every configured column
     integration-dashboard run --variant stable                   # configured columns with variant=stable
     integration-dashboard run --variant stable --python 3.12     # one specific column
-    integration-dashboard run --python 3.14t                     # configured columns with python=3.14t
     integration-dashboard run --variant stable --packages foo,bar
-    integration-dashboard run --variant stable --tiers core
+    integration-dashboard run --variant stable --tiers coordinated
 """
 
 import json
@@ -29,162 +40,43 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from packaging.version import InvalidVersion, Version
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 from . import config, status
 
-PYPI_JSON_URL = "https://pypi.org/pypi/{name}/json"
+# Always installed alongside each column's test_deps.
+TEST_INFRA = ["pytest", "pytest-timeout"]
 
 
-def _http_json(url, timeout=20):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.load(r)
-
-
-def _version_key(v):
+def _uv(args, timeout, stdin=None):
+    """Run a uv command, with colour off so its output can be parsed."""
     try:
-        return Version(v)
-    except InvalidVersion:
-        return Version("0")
-
-
-def _is_prerelease(v):
-    try:
-        return Version(v).is_prerelease
-    except InvalidVersion:
-        return True
-
-
-def _yanked(files):
-    return all(f.get("yanked") for f in files) if files else True
-
-
-def latest_pypi(name, include_prereleases):
-    info = _http_json(PYPI_JSON_URL.format(name=name))
-    versions = []
-    for ver, files in info["releases"].items():
-        if _yanked(files):
-            continue
-        if not include_prereleases and _is_prerelease(ver):
-            continue
-        versions.append(ver)
-    if not versions and not include_prereleases:
-        # Fallback: package has only pre-releases on PyPI
-        return latest_pypi(name, include_prereleases=True)
-    if not versions:
-        return None
-    return sorted(versions, key=_version_key)[-1]
-
-
-def _extras_suffix(pkg):
-    extras = pkg.get("install_extras") or []
-    return "[" + ",".join(extras) + "]" if extras else ""
-
-
-def resolve_specs(packages, variant, core):
-    """Resolve the core-package spec and per-package install specs for the variant."""
-    core_name = core["pypi_name"]
-    if variant == "dev":
-        dev_index_urls = core.get("dev_index_urls") or []
-        if dev_index_urls:
-            # Let uv resolve the latest dev version from the core
-            # package's nightly channel; we read the installed version
-            # back after install. No explicit pin avoids the PEP 440
-            # local-version segment headaches that nightly wheels have
-            # (e.g. 1.2.0.dev53+gabcdef).
-            #
-            # `--index-strategy unsafe-best-match` is required because
-            # uv's default ("first-index") only considers a single
-            # index per package; a nightly channel often hosts the core
-            # package AND its compiled deps, and its latest wheels
-            # sometimes don't match the runner platform.
-            # unsafe-best-match lets uv fall back to PyPI in that case.
-            core_spec = {
-                "install": core_name,
-                "version": "",
-                "extra_index_urls": dev_index_urls,
-                "prerelease_strategy": "allow",
-                "index_strategy": "unsafe-best-match",
-            }
-        else:
-            # No nightly channel configured: install the core package's
-            # dev version straight from the HEAD of its repository.
-            core_spec = {
-                "install": f"{core_name} @ git+{core['repo_url']}",
-                "version": "",
-                "extra_index_urls": [],
-                "prerelease_strategy": "allow",
-                "index_strategy": None,
-            }
-
-        def pkg_spec(pkg):
-            repo = pkg.get("repo_url")
-            if not repo:
-                return None, None
-            return f"{pkg['pypi_name']}{_extras_suffix(pkg)} @ git+{repo}", None
-
-    else:
-        include_pre = variant == "pre"
-        core_ver = latest_pypi(core_name, include_prereleases=include_pre)
-        core_spec = {
-            "install": f"{core_name}=={core_ver}",
-            "version": core_ver,
-            "extra_index_urls": [],
-            "prerelease_strategy": "allow"
-            if include_pre
-            else "if-necessary-or-explicit",
-            "index_strategy": None,
-        }
-
-        def pkg_spec(pkg):
-            ver = latest_pypi(pkg["pypi_name"], include_prereleases=include_pre)
-            if not ver:
-                return None, None
-            return f"{pkg['pypi_name']}{_extras_suffix(pkg)}=={ver}", ver
-
-    pkg_specs = []
-    for pkg in packages:
-        spec, target = pkg_spec(pkg)
-        pkg_specs.append((pkg, spec, target))
-    return core_spec, pkg_specs
-
-
-def _resolver_conflict(stderr):
-    """True if the install stderr looks like a uv resolver conflict."""
-    s = stderr.lower()
-    keywords = (
-        "no solution found",
-        "incompatible",
-        "conflict",
-        "could not find a version",
-        "no matching distribution",
-        "no version of",
-    )
-    return any(k in s for k in keywords)
+        return subprocess.run(
+            ["uv", "--color", "never", *args],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args, 1, "", f"uv timed out after {timeout}s"
+        )
 
 
 def ensure_python(version):
-    proc = subprocess.run(
-        ["uv", "python", "find", version], capture_output=True, text=True, timeout=60
-    )
-    if proc.returncode == 0:
-        return proc.stdout.strip()
-    inst = subprocess.run(
-        ["uv", "python", "install", version],
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    if inst.returncode != 0:
-        sys.exit(f"uv python install {version}: {inst.stderr.strip()}")
-    proc = subprocess.run(
-        ["uv", "python", "find", version], capture_output=True, text=True, timeout=60
-    )
+    proc = _uv(["python", "find", version], timeout=60)
+    if proc.returncode != 0:
+        inst = _uv(["python", "install", version], timeout=600)
+        if inst.returncode != 0:
+            sys.exit(f"uv python install {version}: {inst.stderr.strip()}")
+        proc = _uv(["python", "find", version], timeout=60)
     if proc.returncode != 0:
         sys.exit(f"uv python find {version}: {proc.stderr.strip()}")
     return proc.stdout.strip()
@@ -192,11 +84,7 @@ def ensure_python(version):
 
 def _venv_python_version(python):
     proc = subprocess.run(
-        [
-            python,
-            "-c",
-            "import sys; print('.'.join(str(x) for x in sys.version_info[:3]))",
-        ],
+        [python, "-c", "import sys; print('.'.join(map(str, sys.version_info[:3])))"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -204,113 +92,162 @@ def _venv_python_version(python):
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def _pkg_version(python, name):
-    proc = subprocess.run(
-        [
-            python,
-            "-c",
-            "import importlib.metadata as md, sys; print(md.version(sys.argv[1]))",
-            name,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    return proc.stdout.strip() if proc.returncode == 0 else ""
+def _parse_compile(text):
+    """Parse ``uv pip compile --annotation-style split`` output.
 
-
-def _freeze(python):
-    proc = subprocess.run(
-        ["uv", "pip", "freeze", "--python", python],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    out = {}
-    if proc.returncode == 0:
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "==" in line:
-                n, v = line.split("==", 1)
-                out[n.lower()] = v
-    return out
-
-
-def _write_no_downgrade_constraints(python, path):
-    """Pin every installed package to '>=' its current version.
-
-    Passed as a uv `--constraint` file to later installs so a new package
-    can pull its deps forward but never downgrade what the shared venv
-    already has; a package that genuinely needs an older version then
-    shows up as a resolver conflict (skipped) instead of silently
-    poisoning the venv for everything tested afterwards.
+    Returns {canonical name: (version, {names of the packages that require
+    it})}. Top-level requirements have no requirers, and a package
+    installed from a URL (``name @ git+...``) has version None.
     """
-    frozen = _freeze(python)
-    lines = []
-    for name, ver in sorted(frozen.items()):
-        try:
-            # Drop any PEP 440 local-version segment (e.g. the '+g1a2b3c4'
-            # that nightly wheels often carry): uv rejects a '>=' specifier
-            # with a local segment and would fail to parse the whole file.
-            public = Version(ver).public
-        except InvalidVersion:
+    pins = {}
+    name = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#"):
+            via = line.lstrip("#").strip().removeprefix("via").strip()
+            if name and via:
+                pins[name][1].update(
+                    canonicalize_name(v.strip()) for v in via.split(",")
+                )
             continue
-        lines.append(f"{name}>={public}")
-    Path(path).write_text("\n".join(lines) + ("\n" if lines else ""))
+        if " @ " in line:
+            raw, version = line.split(" @ ", 1)[0], None
+        elif "==" in line:
+            raw, version = (part.strip() for part in line.split("==", 1))
+        else:
+            continue
+        name = canonicalize_name(raw.split("[", 1)[0])
+        pins[name] = (version, set())
+    return pins
 
 
-def _install_order(packages):
-    """Group by tier in order of first appearance, alphabetical within each tier.
+def _installed(python):
+    """{canonical name: version} for everything installed in the venv."""
+    proc = _uv(["pip", "list", "--python", python, "--format", "json"], timeout=60)
+    if proc.returncode != 0:
+        return {}
+    return {canonicalize_name(p["name"]): p["version"] for p in json.loads(proc.stdout)}
 
-    Tiers carry no built-in ranking: whichever tier a package with that
-    tier first appears in the config is installed (and displayed) first.
-    Packages without a tier share a single empty-named group.
+
+class Column:
+    """uv settings shared by every resolve and install in one column."""
+
+    def __init__(
+        self, variant, python, dev_index_urls, constraints_file, tmpdir, timeout
+    ):
+        self.timeout = timeout
+        self.constraints_file = constraints_file
+        self.floors_file = os.path.join(tmpdir, "floors.txt")
+        self.options = ["--python", python]
+        if variant in ("pre", "dev"):
+            self.options += ["--prerelease", "allow"]
+        if variant == "dev" and dev_index_urls:
+            for url in dev_index_urls:
+                self.options += ["--extra-index-url", url]
+            # A nightly channel only hosts some packages and its wheels may
+            # not cover this platform, so let uv pick the best match across
+            # every index rather than stopping at the first that has a name.
+            self.options += ["--index-strategy", "unsafe-best-match"]
+
+    def resolve(self, requirements, floors=True, no_deps=False):
+        """Resolve requirements without installing. Returns (pins, error)."""
+        args = ["pip", "compile", "-", "--no-header", "--quiet"]
+        args += ["--annotation-style", "split"]
+        args += self.options + ["--constraint", self.constraints_file]
+        if floors:
+            args += ["--constraint", self.floors_file]
+        if no_deps:
+            args.append("--no-deps")
+        proc = _uv(args, self.timeout, stdin="\n".join(requirements) + "\n")
+        if proc.returncode != 0:
+            return None, proc.stderr or proc.stdout
+        return _parse_compile(proc.stdout), ""
+
+    def install(self, requirements):
+        """Install requirements into the venv at the planned versions."""
+        args = ["pip", "install", "--quiet", *self.options]
+        args += ["--constraint", self.constraints_file]
+        args += ["--constraint", self.floors_file, *requirements]
+        proc = _uv(args, self.timeout)
+        return proc.returncode == 0, proc.stderr or proc.stdout
+
+    def latest(self, names):
+        """Latest version of each named package allowed in this column."""
+        pins = {}
+        # Looked up one at a time, since a name with no release would fail a batch.
+        for name in names:
+            pins.update(self.resolve([name], floors=False, no_deps=True)[0] or {})
+        return {name: version for name, (version, _) in pins.items()}
+
+    def write_floors(self, floors):
+        # The public version drops any local segment (e.g. +g1a2b3c4 on a
+        # nightly wheel), which uv does not accept in a '>=' constraint.
+        lines = [f"{name}>={Version(v).public}" for name, v in sorted(floors.items())]
+        Path(self.floors_file).write_text("\n".join(lines) + "\n")
+
+
+def _requirements(pkg, variant, nightly):
+    """Requirements that install one listed package, or None if there are none."""
+    extras = pkg.get("install_extras") or []
+    base = pkg["pypi_name"] + ("[" + ",".join(extras) + "]" if extras else "")
+    extra_deps = pkg.get("extra_deps") or []
+    if variant != "dev" or canonicalize_name(pkg["pypi_name"]) in nightly:
+        return [base, *extra_deps]
+    if pkg.get("repo_url"):
+        return [f"{base} @ git+{pkg['repo_url']}", *extra_deps]
+    return None
+
+
+def _plan(column, requirements, listed, infra, log):
+    """Work out which packages can share one venv without dragging dependencies down.
+
+    ``requirements`` maps package name to its install requirements, and
+    ``listed`` is the set of every listed package name. Returns
+    {name: (install_status, error)} for packages that cannot be installed;
+    any package not in it can be. Leaves the floors file in place for the
+    installs that follow.
     """
-    tier_rank = {}
-    for pkg in packages:
-        tier = pkg.get("tier", "")
-        tier_rank.setdefault(tier, len(tier_rank))
-    return sorted(
-        packages,
-        key=lambda p: (tier_rank[p.get("tier", "")], p["pypi_name"].lower()),
-    )
 
+    def resolve_all(names, floors):
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            jobs = [(requirements[name] + infra, floors) for name in names]
+            return dict(zip(names, pool.map(lambda job: column.resolve(*job), jobs)))
 
-def _run_install(install_cmd, timeout):
-    """Wrap subprocess.run with TimeoutExpired catch. Returns (rc, stderr_or_msg)."""
-    try:
-        proc = subprocess.run(
-            install_cmd, capture_output=True, text=True, timeout=timeout
-        )
-    except subprocess.TimeoutExpired:
-        return None, "timeout during install"
-    return proc.returncode, (proc.stderr or proc.stdout)
+    failed = {}
+    floors = {}
+    for name, (pins, error) in resolve_all(list(requirements), False).items():
+        if pins is None:
+            failed[name] = (status.INSTALL_FAIL, error)
+            log(f"  {name}: cannot be resolved")
+            continue
+        # Listed packages, the top-level requirements (which have no
+        # requirers), and whatever a listed package requires directly.
+        for dep, (version, via) in pins.items():
+            if version and (dep in listed or not via or via & listed):
+                if dep not in floors or Version(version) > Version(floors[dep]):
+                    floors[dep] = version
+
+    column.write_floors(floors)
+    candidates = [name for name in requirements if name not in failed]
+    for name, (pins, error) in resolve_all(candidates, True).items():
+        if pins is None:
+            failed[name] = (status.HELD_BACK, error)
+            log(f"  {name}: held back")
+    return failed
 
 
 def run_variant(
-    variant, python_version, packages, repo_root, results_dir, timeouts, core
+    variant, python_version, packages, cfg, repo_root, results_dir, timeouts
 ):
-    core_spec, pkg_specs = resolve_specs(packages, variant, core)
     print(f"\n=== Variant: {variant} (Python {python_version}) ===")
-    print(f"  {core['pypi_name']}: {core_spec['install']}")
-    for pkg, spec, target in pkg_specs:
-        print(f"  {pkg['pypi_name']:<20} {spec or '(no install spec)'}")
-
+    constraints = [c for c in cfg["constraints"] if variant in c["variants"]]
     result = {
         "variant": variant,
         "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "finished_at": "",
-        "core": {
-            "name": core["pypi_name"],
-            "install_spec": core_spec["install"],
-            "version": core_spec["version"],
-            "extra_index_urls": core_spec["extra_index_urls"],
-            "prerelease_strategy": core_spec["prerelease_strategy"],
-        },
         "python_requested": python_version,
         "python_version": "",
+        "constraints": constraints,
         "timeout_test_seconds": timeouts["test"],
         "pytest_limit_n": (
             int(os.environ["PYTEST_LIMIT_N"])
@@ -322,6 +259,7 @@ def run_variant(
         "packages": [],
     }
     out_path = results_dir / f"{variant}__{python_version}.json"
+    entries = {}
 
     Path(repo_root, ".tmp").mkdir(exist_ok=True)
     tmpdir = tempfile.mkdtemp(
@@ -330,105 +268,116 @@ def run_variant(
     )
 
     try:
-        py_path = ensure_python(python_version)
         venv = os.path.join(tmpdir, "venv")
-        venv_proc = subprocess.run(
-            ["uv", "venv", venv, "-p", py_path, "-q"],
-            capture_output=True,
-            text=True,
-            timeout=120,
+        proc = _uv(
+            ["venv", venv, "-p", ensure_python(python_version), "-q"], timeout=120
         )
-        if venv_proc.returncode != 0:
-            result["fatal_error"] = f"uv venv: {venv_proc.stderr or venv_proc.stdout}"
+        if proc.returncode != 0:
+            result["fatal_error"] = f"uv venv: {proc.stderr or proc.stdout}"
             return result, out_path
         python = os.path.join(venv, "bin", "python")
         result["python_version"] = _venv_python_version(python)
-        constraints_path = os.path.join(tmpdir, "no-downgrade-constraints.txt")
 
-        common = ["uv", "pip", "install", "--python", python, "-q"]
-        for url in core_spec["extra_index_urls"]:
-            common += ["--extra-index-url", url]
-        common += [f"--prerelease={core_spec['prerelease_strategy']}"]
-        if core_spec.get("index_strategy"):
-            common += [f"--index-strategy={core_spec['index_strategy']}"]
-
-        print(f"\nInstalling {core['pypi_name']} + pytest...")
-        # `core_package.test_deps` lets a config add pytest plugins shared
-        # by the whole ecosystem (e.g. a plugin that registers a marker so
-        # the matching tests are skipped instead of run) into the venv
-        # alongside pytest itself.
-        test_deps = core.get("test_deps") or []
-        rc, err = _run_install(
-            common
-            + [core_spec["install"], "pytest", "pytest-timeout", *test_deps],
+        constraints_file = os.path.join(tmpdir, "constraints.txt")
+        Path(constraints_file).write_text(
+            "".join(c["spec"] + "\n" for c in constraints)
+        )
+        column = Column(
+            variant,
+            python,
+            cfg["dev_index_urls"],
+            constraints_file,
+            tmpdir,
             timeouts["install"],
         )
-        if rc != 0:
-            print(f"  FATAL: {core['pypi_name']} install failed")
-            print(err)
-            result["fatal_error"] = err
-            return result, out_path
-        result["core"]["version"] = (
-            _pkg_version(python, core["pypi_name"]) or result["core"]["version"]
-        )
-        _write_no_downgrade_constraints(python, constraints_path)
 
-        installed_pkgs = []
-        for pkg, install_spec, target_version in pkg_specs:
-            entry = {
+        # In dev columns a listed package comes from a nightly wheel when one
+        # of the dev indexes has one, and is built from git otherwise.
+        nightly = set()
+        if variant == "dev" and cfg["dev_index_urls"]:
+            latest = column.latest(
+                {canonicalize_name(p["pypi_name"]) for p in packages}
+            )
+            nightly = {n for n, v in latest.items() if v and Version(v).is_devrelease}
+
+        requirements = {}
+        for pkg in packages:
+            name = canonicalize_name(pkg["pypi_name"])
+            reqs = _requirements(pkg, variant, nightly)
+            entries[name] = {
                 "name": pkg["pypi_name"],
                 "tier": pkg.get("tier", ""),
-                "module": pkg.get("module", pkg["pypi_name"]),
-                "install_spec": install_spec,
-                "target_version": target_version,
+                "module": pkg["module"],
+                "install_spec": " ".join(reqs or []),
                 "resolved_version": "",
-                "install_status": "",  # installed | skipped | install-fail | no-spec
+                "install_status": "",
                 "install_error": "",
-                "test_status": "",  # pass | fail | no-tests | timeout | not-run
+                "test_status": "",
                 "test_output": "",
                 "duration": 0,
             }
-            if install_spec is None:
-                entry["install_status"] = status.NO_SPEC
-                entry["install_error"] = (
-                    "no install spec (missing repo_url, or no PyPI release)"
+            if reqs is None:
+                entries[name]["install_status"] = status.NO_SPEC
+                entries[name]["install_error"] = (
+                    "no nightly wheel and no repo_url to build from"
                 )
-                result["packages"].append(entry)
-                continue
-
-            print(f"\nInstalling {pkg['pypi_name']}...")
-            install_cmd = (
-                common
-                + ["--constraint", constraints_path, install_spec]
-                + (pkg.get("extra_deps") or [])
-            )
-            rc, err = _run_install(install_cmd, timeouts["install"])
-            if rc == 0:
-                entry["install_status"] = status.INSTALLED
-                entry["resolved_version"] = _pkg_version(python, pkg["pypi_name"])
-                print(f"  installed at {entry['resolved_version']}")
-                installed_pkgs.append((pkg, entry))
-                _write_no_downgrade_constraints(python, constraints_path)
             else:
-                entry["install_error"] = err
-                if _resolver_conflict(err):
-                    entry["install_status"] = status.SKIPPED
-                    print("  skipped (resolver conflict)")
-                else:
-                    entry["install_status"] = status.INSTALL_FAIL
-                    print("  install failed")
-                print(err)
-            result["packages"].append(entry)
+                requirements[name] = reqs
+            print(
+                f"  {pkg['pypi_name']:<20} {entries[name]['install_spec'] or '(no install spec)'}"
+            )
 
-        result["installed_deps"] = _freeze(python)
+        infra = TEST_INFRA + cfg["test_deps"]
+        print("\nPlanning...")
+        listed = {canonicalize_name(p["pypi_name"]) for p in packages}
+        for name, (install_status, error) in _plan(
+            column, requirements, listed, infra, print
+        ).items():
+            entries[name]["install_status"] = install_status
+            entries[name]["install_error"] = error
 
-        for pkg, entry in installed_pkgs:
-            print(f"\nTesting {pkg['pypi_name']}...")
-            module = entry["module"]
-            cmd = [python, "-m", "pytest", "--pyargs", module]
-            cmd += pkg.get("pytest_args", [])
+        print("\nInstalling pytest and test dependencies...")
+        ok, error = column.install(infra)
+        if not ok:
+            print(error)
+            result["fatal_error"] = error
+            return result, out_path
+
+        to_test = []
+        for name, reqs in requirements.items():
+            entry = entries[name]
+            if entry["install_status"]:
+                continue
+            print(f"\nInstalling {entry['name']}...")
+            ok, error = column.install(reqs)
+            if ok:
+                entry["install_status"] = status.INSTALLED
+                to_test.append((name, entry))
+            else:
+                entry["install_status"] = status.INSTALL_FAIL
+                entry["install_error"] = error
+                print(f"  install failed\n{error}")
+
+        result["installed_deps"] = _installed(python)
+        for name, entry in to_test:
+            entry["resolved_version"] = result["installed_deps"].get(name) or ""
+            print(f"  {entry['name']} {entry['resolved_version']}")
+
+        pytest_args = {
+            canonicalize_name(p["pypi_name"]): p.get("pytest_args", [])
+            for p in packages
+        }
+        for name, entry in to_test:
+            print(f"\nTesting {entry['name']}...")
+            cmd = [
+                python,
+                "-m",
+                "pytest",
+                "--pyargs",
+                entry["module"],
+                *pytest_args[name],
+            ]
             cmd += ["--timeout=120", "-q", "--tb=line", "--no-header"]
-
             env = {**os.environ, "MPLBACKEND": "Agg", "DISPLAY": ""}
             start = time.time()
             try:
@@ -464,11 +413,26 @@ def run_variant(
             print(f"  {entry['test_status']} in {entry['duration']}s")
 
     finally:
+        result["packages"] = list(entries.values())
         result["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         out_path.write_text(json.dumps(result, indent=2))
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     return result, out_path
+
+
+def _sort_by_tier(packages):
+    """Group by tier in order of first appearance, alphabetical within each tier.
+
+    Tiers carry no built-in ranking: whichever tier appears first in the
+    config is displayed first. Packages without a tier share one group.
+    """
+    tier_rank = {}
+    for pkg in packages:
+        tier_rank.setdefault(pkg.get("tier", ""), len(tier_rank))
+    return sorted(
+        packages, key=lambda p: (tier_rank[p.get("tier", "")], p["pypi_name"].lower())
+    )
 
 
 def _counts(result):
@@ -506,28 +470,30 @@ def run(args):
     # instead of buffering until the script exits.
     sys.stdout.reconfigure(line_buffering=True)
 
-    core = config.load_core_package(args.config)
     all_packages = config.load_packages(args.config)
+    cfg = {
+        "constraints": config.load_constraints(args.config),
+        "dev_index_urls": config.load_dev_index_urls(args.config),
+        "test_deps": config.load_test_deps(args.config),
+    }
     packages = all_packages
     if args.tiers:
         wanted_tiers = {t.strip() for t in args.tiers.split(",") if t.strip()}
         packages = [p for p in packages if p.get("tier", "") in wanted_tiers]
     if args.packages:
         wanted = {n.strip() for n in args.packages.split(",") if n.strip()}
-        known = {p["pypi_name"] for p in all_packages}
-        unknown = wanted - known
+        unknown = wanted - {p["pypi_name"] for p in all_packages}
         if unknown:
             sys.exit(
                 f"Unknown package name(s): {', '.join(sorted(unknown))}. "
                 f"Valid names are the pypi_name entries in {args.config}."
             )
         packages = [p for p in packages if p["pypi_name"] in wanted]
-    packages = _install_order(packages)
+    packages = _sort_by_tier(packages)
 
     repo_root = Path.cwd()
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
-
     timeouts = {"install": args.timeout_install, "test": args.timeout_test}
 
     columns = config.load_columns(args.config)
@@ -538,16 +504,21 @@ def run(args):
     if not columns:
         sys.exit("No configured columns match the given --variant/--python filters.")
 
-    fatal_combos = []
-    for column in columns:
-        variant, python_version = column["variant"], column["python"]
+    fatal = []
+    for col in columns:
         result, out_path = run_variant(
-            variant, python_version, packages, repo_root, results_dir, timeouts, core
+            col["variant"],
+            col["python"],
+            packages,
+            cfg,
+            repo_root,
+            results_dir,
+            timeouts,
         )
-        print(f"\nDone {variant}/{python_version}: {_counts(result)}")
+        print(f"\nDone {col['variant']}/{col['python']}: {_counts(result)}")
         print(f"Wrote {out_path}")
-        if result.get("fatal_error"):
-            fatal_combos.append(f"{variant}/{python_version}")
+        if result["fatal_error"]:
+            fatal.append(f"{col['variant']}/{col['python']}")
 
-    if fatal_combos:
-        sys.exit(f"\n{core['pypi_name']} install failed for: {', '.join(fatal_combos)}")
+    if fatal:
+        sys.exit(f"\nCould not set up the test environment for: {', '.join(fatal)}")

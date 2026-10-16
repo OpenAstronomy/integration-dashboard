@@ -84,8 +84,6 @@ def _variant_meta(variant, python, data):
         "variant": variant,
         "python": python,
         "has_data": True,
-        "core_version": data["core"]["version"],
-        "extra_index_urls": data["core"].get("extra_index_urls") or [],
         "python_version": data.get("python_version") or python,
         "started_at": data["started_at"],
         "finished_at": data["finished_at"],
@@ -190,7 +188,7 @@ def build(results_dir, output_dir, config_path):
     )
 
     config_columns = config.load_columns(config_path)
-    core = config.load_core_package(config_path)
+    constraints = config.load_constraints(config_path)
     title = config.load_dashboard_title(config_path)
 
     by_combo = _load_results(results_dir)
@@ -216,7 +214,8 @@ def build(results_dir, output_dir, config_path):
     (output_dir / "index.html").write_text(
         env.get_template("index.html").render(
             title=title,
-            core_name=core["pypi_name"],
+            constraints=constraints,
+            all_variants=list(status.VARIANTS),
             column_groups=column_groups,
             columns=columns,
             variants_meta=variants_meta,
