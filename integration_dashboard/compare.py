@@ -21,8 +21,9 @@ individual test results shows what the change broke (or fixed), even when a
 downstream package already has failing tests on its own.
 
 The output shows the full traceback of every newly failing test, then a
-one-line summary per package. Exits non-zero if any test newly fails, or a
-package that installed before no longer installs.
+one-line summary per package. Exits non-zero if any test newly fails, or if
+either environment fails to install, since the change could then not be
+checked.
 
 Usage:
     integration-dashboard compare --package astropy \\
@@ -188,34 +189,37 @@ def compare_package(pkg, ctx):
     return result
 
 
-def _regressed(result):
-    """New test failures, or an install that worked before and now fails."""
+def _outcome(result):
+    """(failed, description): did the comparison fail, and how to describe it.
+
+    Any install failure fails it, since then the change could not be checked.
+    """
     before, after = result["before"], result["after"]
-    broke_install = "install_error" in after and "install_error" not in before
-    return bool(result["newly_failing"]) or broke_install
+    if "install_error" in before:
+        return True, "could not install the before environment"
+    if "install_error" in after:
+        return True, "no longer installs"
+    if result["newly_failing"]:
+        return True, f"{len(result['newly_failing'])} newly failing"
+    return False, "no new failures"
 
 
 def _summary_cell(side):
     if "install_error" in side:
         return "install failed"
     if "counts" not in side:
-        return "-"
+        return "not run"
     passed = side["counts"].get("passed", 0)
     broken = sum(side["counts"].get(o, 0) for o in BROKEN)
     return f"{passed} passed, {broken} failing" if broken else f"{passed} passed"
 
 
 def _summary_line(result):
-    before, after = result["before"], result["after"]
-    if _regressed(result) and result["newly_failing"]:
-        outcome = f"{len(result['newly_failing'])} newly failing"
-    elif _regressed(result):
-        outcome = "no longer installs"
-    else:
-        outcome = "no new failures"
+    outcome = _outcome(result)[1]
     if result["newly_passing"]:
         outcome += f", {len(result['newly_passing'])} newly passing"
-    return f"{result['name']}: {outcome} (before: {_summary_cell(before)}; after: {_summary_cell(after)})"
+    before, after = _summary_cell(result["before"]), _summary_cell(result["after"])
+    return f"{result['name']}: {outcome} (before: {before}; after: {after})"
 
 
 def add_arguments(ap):
@@ -293,5 +297,5 @@ def run_compare(args):
     print("\n===== Summary =====")
     for result in results:
         print(_summary_line(result))
-    if any(_regressed(r) for r in results):
+    if any(_outcome(r)[0] for r in results):
         sys.exit(1)

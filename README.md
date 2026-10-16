@@ -171,8 +171,9 @@ and the "after" venv is built from the same lock with only the changed package
 swapped. The individual test results are then compared, so the output lists
 the tests that newly fail even when a downstream package already has failing
 tests of its own. The output shows the full traceback of every newly failing
-test (and any install errors), then a one-line summary per package, and the
-command exits non-zero if anything newly fails.
+test (and any install errors), then a one-line summary per package. The
+command exits non-zero if anything newly fails, or if either environment fails
+to install, since the change could then not be checked.
 
 The `compare.yml` reusable workflow runs one job per downstream package, which
 fails if that package has new failures; its log ends with the tracebacks and
