@@ -406,14 +406,16 @@ def run_variant(
     return result, out_path
 
 
-def run_tests(python, module, pytest_args, repo_root, timeout, junit_path=None):
+def run_tests(
+    python, module, pytest_args, repo_root, timeout, junit_path=None, traceback="line"
+):
     """Run one package's tests with ``pytest --pyargs``.
 
     Runs from ``repo_root`` so the consuming repo's ``conftest.py`` applies.
     Returns (test_status, output, duration in seconds).
     """
     cmd = [python, "-m", "pytest", "--pyargs", module, *pytest_args]
-    cmd += ["--timeout=120", "-q", "--tb=line", "--no-header"]
+    cmd += ["--timeout=120", "-q", f"--tb={traceback}", "--no-header"]
     if junit_path:
         cmd.append(f"--junitxml={junit_path}")
     env = {**os.environ, "MPLBACKEND": "Agg", "DISPLAY": ""}

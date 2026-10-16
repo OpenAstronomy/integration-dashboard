@@ -20,10 +20,10 @@ Only the changed package differs between the two runs, so comparing the
 individual test results shows what the change broke (or fixed), even when a
 downstream package already has failing tests on its own.
 
-Writes one ``<package>.json`` per downstream package to ``--results-dir``
-and a Markdown report to ``--report`` from every JSON there (with
-``--report-only``, just the report). Exits non-zero if any test newly fails,
-or a package that installed before no longer installs.
+The output shows the full traceback of every newly failing test, then a
+one-line summary per package; ``--report`` gets the same summary as a
+Markdown table. Exits non-zero if any test newly fails, or a package that
+installed before no longer installs.
 
 Usage:
     integration-dashboard compare --package astropy \\
@@ -31,7 +31,6 @@ Usage:
         --after /path/to/astropy-checkout --tiers coordinated
 """
 
-import json
 import os
 import shutil
 import sys
@@ -57,22 +56,22 @@ def _name(requirement_line):
 
 
 def _test_outcomes(junit_path):
-    """{test id: outcome} and {test id: failure message} from a JUnit file.
+    """{test id: outcome} and {test id: traceback} from a JUnit file.
 
     Test ids are made venv-independent by dropping everything up to
     ``site-packages``, so the same test matches across the two runs.
     """
-    outcomes, messages = {}, {}
+    outcomes, tracebacks = {}, {}
     if not Path(junit_path).exists():
-        return outcomes, messages
+        return outcomes, tracebacks
     for case in ET.parse(junit_path).iter("testcase"):
         classname = case.get("classname", "").split("site-packages.", 1)[-1]
         test_id = f"{classname}::{case.get('name')}"
         child = next((c for c in case if c.tag in OUTCOME), None)
         outcomes[test_id] = OUTCOME[child.tag] if child is not None else "passed"
         if child is not None and child.tag != "skipped":
-            messages[test_id] = (child.get("message") or child.text or "")[:2000]
-    return outcomes, messages
+            tracebacks[test_id] = child.text or child.get("message") or ""
+    return outcomes, tracebacks
 
 
 def _requirement(ctx, spec, label):
@@ -144,7 +143,7 @@ def compare_package(pkg, ctx):
 
     pkg_dir = tempfile.mkdtemp(prefix=f"{name}-", dir=ctx.workdir)
     outcomes = {}
-    messages = {}
+    tracebacks = {}
     try:
         for label, lock in locks.items():
             side = result[label]
@@ -163,8 +162,9 @@ def compare_package(pkg, ctx):
                 ctx.repo_root,
                 ctx.timeouts["test"],
                 junit_path=junit,
+                traceback="long",
             )
-            outcomes[label], messages = _test_outcomes(junit)
+            outcomes[label], tracebacks = _test_outcomes(junit)
             side["counts"] = dict(Counter(outcomes[label].values()))
             print(
                 f"  {label}: {side['test_status']} {side['counts']} in {side['duration']}s"
@@ -180,15 +180,12 @@ def compare_package(pkg, ctx):
         result["newly_passing"] = sorted(
             t for t, o in new.items() if o == "passed" and old.get(t) in BROKEN
         )
-        # The details go to the log only; the report just has the counts.
-        print(f"  newly failing: {len(result['newly_failing'])}")
+        # Full tracebacks go to the output only; the summary just has counts.
         for test in result["newly_failing"]:
-            print(f"    {test}")
-            if messages.get(test, "").strip():
-                print("      " + messages[test].strip().replace("\n", "\n      "))
-        print(f"  newly passing: {len(result['newly_passing'])}")
+            print(f"\n_____ newly failing: {test} _____\n")
+            print(tracebacks.get(test, "").rstrip())
         for test in result["newly_passing"]:
-            print(f"    {test}")
+            print(f"  newly passing: {test}")
     return result
 
 
@@ -207,6 +204,19 @@ def _summary_cell(side):
     passed = side["counts"].get("passed", 0)
     broken = sum(side["counts"].get(o, 0) for o in BROKEN)
     return f"{passed} passed, {broken} failing" if broken else f"{passed} passed"
+
+
+def _summary_line(result):
+    before, after = result["before"], result["after"]
+    if _regressed(result) and result["newly_failing"]:
+        outcome = f"{len(result['newly_failing'])} newly failing"
+    elif _regressed(result):
+        outcome = "no longer installs"
+    else:
+        outcome = "no new failures"
+    if result["newly_passing"]:
+        outcome += f", {len(result['newly_passing'])} newly passing"
+    return f"{result['name']}: {outcome} (before: {_summary_cell(before)}; after: {_summary_cell(after)})"
 
 
 def render_report(results):
@@ -257,10 +267,14 @@ def add_arguments(ap):
         "--package", required=True, help="Listed package being changed (e.g. astropy)"
     )
     ap.add_argument(
-        "--before", help="pip URL or local path of the package before the change"
+        "--before",
+        required=True,
+        help="pip URL or local path of the package before the change",
     )
     ap.add_argument(
-        "--after", help="pip URL or local path of the package after the change"
+        "--after",
+        required=True,
+        help="pip URL or local path of the package after the change",
     )
     ap.add_argument("--packages", help="Comma-separated downstream packages to test")
     ap.add_argument(
@@ -273,69 +287,56 @@ def add_arguments(ap):
         help="How downstream packages are installed (default: dev, i.e. their main branch)",
     )
     ap.add_argument("--python", default="3.12")
-    ap.add_argument("--results-dir", default="compare-results")
     ap.add_argument("--report", default="compare-report.md")
-    ap.add_argument(
-        "--report-only",
-        action="store_true",
-        help="Only render the report from the JSON files already in --results-dir",
-    )
     ap.add_argument("--timeout-install", type=int, default=900)
     ap.add_argument("--timeout-test", type=int, default=1800)
 
 
 def run_compare(args):
     sys.stdout.reconfigure(line_buffering=True)
-    results_dir = Path(args.results_dir)
-    results_dir.mkdir(parents=True, exist_ok=True)
+    changed = canonicalize_name(args.package)
+    all_packages = config.load_packages(args.config)
+    if changed not in {canonicalize_name(p["pypi_name"]) for p in all_packages}:
+        sys.exit(f"--package {args.package} is not listed in {args.config}")
+    packages = [
+        p
+        for p in run.select_packages(all_packages, args.tiers, args.packages)
+        if canonicalize_name(p["pypi_name"]) != changed
+    ]
+    if not packages:
+        sys.exit("No downstream packages selected.")
 
-    if not args.report_only:
-        if not (args.before and args.after):
-            sys.exit("--before and --after are required unless --report-only is given")
-        changed = canonicalize_name(args.package)
-        all_packages = config.load_packages(args.config)
-        if changed not in {canonicalize_name(p["pypi_name"]) for p in all_packages}:
-            sys.exit(f"--package {args.package} is not listed in {args.config}")
-        packages = [
-            p
-            for p in run.select_packages(all_packages, args.tiers, args.packages)
-            if canonicalize_name(p["pypi_name"]) != changed
-        ]
-        if not packages:
-            sys.exit("No downstream packages selected.")
-
-        settings = config.load_settings(args.config)
-        Path(".tmp").mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=Path(".tmp").resolve()) as workdir:
-            constraints_file = os.path.join(workdir, "constraints.txt")
-            Path(constraints_file).write_text(
-                "".join(
-                    c["spec"] + "\n"
-                    for c in settings["constraints"]
-                    if args.variant in c["variants"]
-                )
+    settings = config.load_settings(args.config)
+    Path(".tmp").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=Path(".tmp").resolve()) as workdir:
+        constraints_file = os.path.join(workdir, "constraints.txt")
+        Path(constraints_file).write_text(
+            "".join(
+                c["spec"] + "\n"
+                for c in settings["constraints"]
+                if args.variant in c["variants"]
             )
-            ctx = SimpleNamespace(
-                changed=args.package,
-                before_spec=args.before,
-                after_spec=args.after,
-                variant=args.variant,
-                python=run.ensure_python(args.python),
-                options=run.uv_options(args.variant, settings["dev_index_urls"]),
-                constraints_file=constraints_file,
-                infra=run.TEST_INFRA + settings["test_deps"],
-                timeouts={"install": args.timeout_install, "test": args.timeout_test},
-                repo_root=Path.cwd(),
-                workdir=workdir,
-            )
-            ctx.before_req = _requirement(ctx, args.before, "before")
-            ctx.after_req = _requirement(ctx, args.after, "after")
-            for pkg in packages:
-                result = compare_package(pkg, ctx)
-                out = results_dir / f"{canonicalize_name(pkg['pypi_name'])}.json"
-                out.write_text(json.dumps(result, indent=2))
+        )
+        ctx = SimpleNamespace(
+            changed=args.package,
+            before_spec=args.before,
+            after_spec=args.after,
+            variant=args.variant,
+            python=run.ensure_python(args.python),
+            options=run.uv_options(args.variant, settings["dev_index_urls"]),
+            constraints_file=constraints_file,
+            infra=run.TEST_INFRA + settings["test_deps"],
+            timeouts={"install": args.timeout_install, "test": args.timeout_test},
+            repo_root=Path.cwd(),
+            workdir=workdir,
+        )
+        ctx.before_req = _requirement(ctx, args.before, "before")
+        ctx.after_req = _requirement(ctx, args.after, "after")
+        results = [compare_package(pkg, ctx) for pkg in packages]
 
-    results = [json.loads(f.read_text()) for f in sorted(results_dir.glob("*.json"))]
+    print("\n===== Summary =====")
+    for result in results:
+        print(_summary_line(result))
     Path(args.report).write_text(render_report(results))
     print(f"\nWrote {args.report}")
     if any(_regressed(r) for r in results):
