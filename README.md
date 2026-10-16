@@ -163,6 +163,8 @@ integration-dashboard compare --package astropy \
 ```
 
 `--before` and `--after` are pip URLs or local paths for the changed package.
+A local path is built into a wheel once at the start of the run, so every
+downstream package is tested against the same build of its current contents.
 For each downstream package, the "before" venv is resolved and locked (git
 installs are locked to a commit, so both runs test the same downstream code),
 and the "after" venv is built from the same lock with only the changed package

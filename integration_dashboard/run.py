@@ -129,6 +129,38 @@ def _installed(python):
     return {canonicalize_name(p["name"]): p["version"] for p in json.loads(proc.stdout)}
 
 
+def uv_options(variant, dev_index_urls):
+    """uv resolve/install options for a variant (everything except --python)."""
+    options = []
+    if variant in ("pre", "dev"):
+        options += ["--prerelease", "allow"]
+    if variant == "dev" and dev_index_urls:
+        for url in dev_index_urls:
+            options += ["--extra-index-url", url]
+        # A nightly channel only hosts some packages and its wheels may
+        # not cover this platform, so let uv pick the best match across
+        # every index rather than stopping at the first that has a name.
+        options += ["--index-strategy", "unsafe-best-match"]
+    return options
+
+
+def select_packages(packages, tiers=None, names=None):
+    """Filter packages by comma-separated tiers and names; exit on unknown names."""
+    if names:
+        wanted = {canonicalize_name(n) for n in names.split(",") if n.strip()}
+        unknown = wanted - {canonicalize_name(p["pypi_name"]) for p in packages}
+        if unknown:
+            sys.exit(
+                f"Unknown package name(s): {', '.join(sorted(unknown))}. "
+                "Valid names are the pypi_name entries in the config."
+            )
+        packages = [p for p in packages if canonicalize_name(p["pypi_name"]) in wanted]
+    if tiers:
+        wanted_tiers = {t.strip() for t in tiers.split(",") if t.strip()}
+        packages = [p for p in packages if p.get("tier", "") in wanted_tiers]
+    return packages
+
+
 class Column:
     """uv settings shared by every resolve and install in one column."""
 
@@ -138,16 +170,7 @@ class Column:
         self.timeout = timeout
         self.constraints_file = constraints_file
         self.floors_file = os.path.join(tmpdir, "floors.txt")
-        self.options = ["--python", python]
-        if variant in ("pre", "dev"):
-            self.options += ["--prerelease", "allow"]
-        if variant == "dev" and dev_index_urls:
-            for url in dev_index_urls:
-                self.options += ["--extra-index-url", url]
-            # A nightly channel only hosts some packages and its wheels may
-            # not cover this platform, so let uv pick the best match across
-            # every index rather than stopping at the first that has a name.
-            self.options += ["--index-strategy", "unsafe-best-match"]
+        self.options = ["--python", python, *uv_options(variant, dev_index_urls)]
 
     def resolve(self, requirements, floors=True, no_deps=False):
         """Resolve requirements without installing. Returns (pins, error)."""
@@ -460,25 +483,10 @@ def run(args):
     # instead of buffering until the script exits.
     sys.stdout.reconfigure(line_buffering=True)
 
-    all_packages = config.load_packages(args.config)
-    cfg = {
-        "constraints": config.load_constraints(args.config),
-        "dev_index_urls": config.load_dev_index_urls(args.config),
-        "test_deps": config.load_test_deps(args.config),
-    }
-    packages = all_packages
-    if args.tiers:
-        wanted_tiers = {t.strip() for t in args.tiers.split(",") if t.strip()}
-        packages = [p for p in packages if p.get("tier", "") in wanted_tiers]
-    if args.packages:
-        wanted = {n.strip() for n in args.packages.split(",") if n.strip()}
-        unknown = wanted - {p["pypi_name"] for p in all_packages}
-        if unknown:
-            sys.exit(
-                f"Unknown package name(s): {', '.join(sorted(unknown))}. "
-                f"Valid names are the pypi_name entries in {args.config}."
-            )
-        packages = [p for p in packages if p["pypi_name"] in wanted]
+    cfg = config.load_settings(args.config)
+    packages = select_packages(
+        config.load_packages(args.config), args.tiers, args.packages
+    )
     packages = _sort_by_tier(packages)
 
     repo_root = Path.cwd()

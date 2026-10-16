@@ -106,12 +106,14 @@ def load_constraints(path):
     return constraints
 
 
-def load_dev_index_urls(path):
-    return list(_load(path).get("dev_index_urls") or [])
-
-
-def load_test_deps(path):
-    return list(_load(path).get("test_deps") or [])
+def load_settings(path):
+    """The settings that apply to every install: constraints, dev indexes, test deps."""
+    data = _load(path)
+    return {
+        "constraints": load_constraints(path),
+        "dev_index_urls": list(data.get("dev_index_urls") or []),
+        "test_deps": list(data.get("test_deps") or []),
+    }
 
 
 def load_dashboard_title(path):

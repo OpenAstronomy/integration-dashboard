@@ -13,6 +13,9 @@ its own venv:
      ``--after``. Anything the new version needs that the lock cannot
      provide is resolved fresh.
 
+A local path is built into a wheel once at the start, so every package is
+tested against the same build of its current contents.
+
 Only the changed package differs between the two runs, so comparing the
 individual test results shows what the change broke (or fixed), even when a
 downstream package already has failing tests on its own.
@@ -34,7 +37,9 @@ import shutil
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 from packaging.utils import canonicalize_name
 
@@ -42,11 +47,7 @@ from . import config, run, status
 
 # Outcomes that count as a regression when a test had passed before.
 BROKEN = ("failed", "error")
-
-
-def _as_url(spec):
-    """Turn a local path into a file URL; leave pip URLs alone."""
-    return spec if "://" in spec else Path(spec).resolve().as_uri()
+OUTCOME = {"failure": "failed", "error": "error", "skipped": "skipped"}
 
 
 def _name(requirement_line):
@@ -56,213 +57,156 @@ def _name(requirement_line):
 
 
 def _test_outcomes(junit_path):
-    """{test id: outcome} from a JUnit file, with outcome passed/failed/error/skipped.
+    """{test id: outcome} and {test id: failure message} from a JUnit file.
 
     Test ids are made venv-independent by dropping everything up to
     ``site-packages``, so the same test matches across the two runs.
     """
-    outcomes = {}
-    messages = {}
+    outcomes, messages = {}, {}
     if not Path(junit_path).exists():
         return outcomes, messages
     for case in ET.parse(junit_path).iter("testcase"):
-        classname = case.get("classname", "")
-        classname = classname.split("site-packages.", 1)[-1]
+        classname = case.get("classname", "").split("site-packages.", 1)[-1]
         test_id = f"{classname}::{case.get('name')}"
-        outcome = "passed"
-        for child in case:
-            if child.tag in ("failure", "error", "skipped"):
-                outcome = {"failure": "failed"}.get(child.tag, child.tag)
-                if child.tag != "skipped":
-                    messages[test_id] = (child.get("message") or child.text or "")[
-                        :2000
-                    ]
-                break
-        outcomes[test_id] = outcome
+        child = next((c for c in case if c.tag in OUTCOME), None)
+        outcomes[test_id] = OUTCOME[child.tag] if child is not None else "passed"
+        if child is not None and child.tag != "skipped":
+            messages[test_id] = (child.get("message") or child.text or "")[:2000]
     return outcomes, messages
 
 
-class Side:
-    """One of the two venvs (before or after) for one downstream package."""
-
-    def __init__(self, label, tmpdir, python, column):
-        self.label = label
-        self.dir = os.path.join(tmpdir, label)
-        os.makedirs(self.dir)
-        self.venv = os.path.join(self.dir, "venv")
-        self.python = os.path.join(self.venv, "bin", "python")
-        self.column = column
-        self.base_python = python
-
-    def build(self, requirements_text):
-        """Create the venv and install ``requirements_text``. Returns an error or ''."""
-        proc = run._uv(["venv", self.venv, "-p", self.base_python, "-q"], timeout=120)
-        if proc.returncode != 0:
-            return proc.stderr or proc.stdout
-        reqs = os.path.join(self.dir, "requirements.txt")
-        Path(reqs).write_text(requirements_text)
-        # The column's options target its base interpreter; install into this venv.
-        options = list(self.column.options)
-        options[options.index("--python") + 1] = self.python
-        args = ["pip", "install", "--quiet", *options, "-r", reqs]
-        args += ["--constraint", self.column.constraints_file]
-        proc = run._uv(args, self.column.timeout)
-        return "" if proc.returncode == 0 else (proc.stderr or proc.stdout)
+def _requirement(ctx, spec, label):
+    """A requirement for the changed package; a local path is built into a wheel."""
+    if "://" not in spec:
+        out = os.path.join(ctx.workdir, f"wheel-{label}")
+        print(f"Building a wheel from {spec}...")
+        proc = run._uv(
+            ["build", "--wheel", "--out-dir", out, "--python", ctx.python, spec],
+            ctx.timeouts["install"],
+        )
+        wheels = list(Path(out).glob("*.whl"))
+        if proc.returncode != 0 or not wheels:
+            sys.exit(f"Could not build {spec}:\n{proc.stderr or proc.stdout}")
+        spec = wheels[0].as_uri()
+    return f"{ctx.changed} @ {spec}"
 
 
-def compare_package(
-    pkg, changed, before, after, cfg, variant, python_version, repo_root, timeouts
-):
+def _install(ctx, venv_dir, requirements_text):
+    """Create a venv and install requirements into it. Returns (python, error)."""
+    proc = run._uv(["venv", venv_dir, "-p", ctx.python, "-q"], timeout=120)
+    if proc.returncode != 0:
+        return None, proc.stderr or proc.stdout
+    python = os.path.join(venv_dir, "bin", "python")
+    reqs = os.path.join(venv_dir, "requirements.txt")
+    Path(reqs).write_text(requirements_text)
+    args = ["pip", "install", "--quiet", "--python", python, *ctx.options]
+    args += ["-r", reqs, "--constraint", ctx.constraints_file]
+    proc = run._uv(args, ctx.timeouts["install"])
+    return python, ("" if proc.returncode == 0 else proc.stderr or proc.stdout)
+
+
+def compare_package(pkg, ctx):
     """Test one downstream package before and after the change."""
     name = pkg["pypi_name"]
     print(f"\n=== {name} ===")
     result = {
         "name": name,
-        "tier": pkg.get("tier", ""),
-        "changed": changed,
-        "before": {"spec": before},
-        "after": {"spec": after},
+        "changed": ctx.changed,
+        "before": {"spec": ctx.before_spec},
+        "after": {"spec": ctx.after_spec},
         "newly_failing": [],
         "newly_passing": [],
     }
-    reqs = run._requirements(pkg, variant, nightly=set())
+    reqs = run._requirements(pkg, ctx.variant, nightly=set())
     if reqs is None:
-        result["error"] = "no repo_url to build the dev version from"
+        for label in ("before", "after"):
+            result[label]["install_error"] = "no repo_url to build the dev version from"
         return result
 
-    Path(repo_root, ".tmp").mkdir(exist_ok=True)
-    tmpdir = tempfile.mkdtemp(
-        prefix=f"compare-{name}-", dir=str(Path(repo_root, ".tmp").resolve())
-    )
+    # Lock the "before" environment; "after" is the same lock with the
+    # changed package swapped.
+    args = ["pip", "compile", "-", "--no-header", "--no-annotate", "--quiet"]
+    args += ["--python", ctx.python, *ctx.options, "--constraint", ctx.constraints_file]
+    stdin = "\n".join([*reqs, *ctx.infra, ctx.before_req]) + "\n"
+    proc = run._uv(args, ctx.timeouts["install"], stdin=stdin)
+    if proc.returncode != 0:
+        result["before"]["install_error"] = proc.stderr or proc.stdout
+        print(
+            f"  could not resolve the before environment:\n{proc.stderr or proc.stdout}"
+        )
+        return result
+    rest = [
+        line
+        for line in proc.stdout.splitlines()
+        if line.strip() and _name(line) != canonicalize_name(ctx.changed)
+    ]
+    locks = {"before": proc.stdout, "after": "\n".join([*rest, ctx.after_req]) + "\n"}
+
+    pkg_dir = tempfile.mkdtemp(prefix=f"{name}-", dir=ctx.workdir)
+    outcomes = {}
+    messages = {}
     try:
-        python = run.ensure_python(python_version)
-        constraints_file = os.path.join(tmpdir, "constraints.txt")
-        Path(constraints_file).write_text(
-            "".join(
-                c["spec"] + "\n" for c in cfg["constraints"] if variant in c["variants"]
-            )
-        )
-        column = run.Column(
-            variant,
-            python,
-            cfg["dev_index_urls"],
-            constraints_file,
-            tmpdir,
-            timeouts["install"],
-        )
-        infra = run.TEST_INFRA + cfg["test_deps"]
-
-        # Lock the "before" environment, then build both venvs from it.
-        before_req = f"{changed} @ {_as_url(before)}"
-        args = ["pip", "compile", "-", "--no-header", "--no-annotate", "--quiet"]
-        args += column.options + ["--constraint", constraints_file]
-        proc = run._uv(
-            args, column.timeout, stdin="\n".join([*reqs, *infra, before_req]) + "\n"
-        )
-        if proc.returncode != 0:
-            result["before"]["install_error"] = proc.stderr or proc.stdout
-            print("  could not resolve the before environment:")
-            print(result["before"]["install_error"])
-            return result
-        lock = proc.stdout
-        changed_key = canonicalize_name(changed)
-        rest = [
-            line
-            for line in lock.splitlines()
-            if line.strip() and _name(line) != changed_key
-        ]
-        after_req = f"{changed} @ {_as_url(after)}"
-
-        sides = {"before": lock, "after": "\n".join([*rest, after_req]) + "\n"}
-        for label, requirements_text in sides.items():
-            side = Side(label, tmpdir, python, column)
+        for label, lock in locks.items():
+            side = result[label]
             print(f"  building {label} venv...")
-            error = side.build(requirements_text)
+            python, error = _install(ctx, os.path.join(pkg_dir, label), lock)
             if error:
-                result[label]["install_error"] = error
+                side["install_error"] = error
                 print(f"  {label} venv failed to install:\n{error}")
                 continue
-            installed = run._installed(side.python)
-            result[label]["changed_version"] = installed.get(changed_key, "")
-            result[label]["version"] = installed.get(canonicalize_name(name), "")
-            junit = os.path.join(side.dir, "junit.xml")
-            test_status, output, duration = run.run_tests(
-                side.python,
+            side["version"] = run._installed(python).get(canonicalize_name(name), "")
+            junit = os.path.join(pkg_dir, f"{label}.xml")
+            side["test_status"], _, side["duration"] = run.run_tests(
+                python,
                 pkg["module"],
                 pkg.get("pytest_args", []),
-                repo_root,
-                timeouts["test"],
+                ctx.repo_root,
+                ctx.timeouts["test"],
                 junit_path=junit,
             )
-            outcomes, messages = _test_outcomes(junit)
-            result[label].update(
-                {
-                    "test_status": test_status,
-                    "duration": duration,
-                    "outcomes": outcomes,
-                    "messages": messages,
-                    "output_tail": output[-3000:],
-                }
+            outcomes[label], messages = _test_outcomes(junit)
+            side["counts"] = dict(Counter(outcomes[label].values()))
+            print(
+                f"  {label}: {side['test_status']} {side['counts']} in {side['duration']}s"
             )
-            counts = {
-                o: sum(v == o for v in outcomes.values())
-                for o in ("passed", "failed", "error", "skipped")
-            }
-            result[label]["counts"] = counts
-            print(f"  {label}: {test_status} {counts} in {duration}s")
-
-        if "outcomes" in result["before"] and "outcomes" in result["after"]:
-            old, new = result["before"]["outcomes"], result["after"]["outcomes"]
-            result["newly_failing"] = sorted(
-                test
-                for test, outcome in new.items()
-                if outcome in BROKEN and old.get(test) not in BROKEN
-            )
-            result["newly_passing"] = sorted(
-                test
-                for test, outcome in new.items()
-                if outcome == "passed" and old.get(test) in BROKEN
-            )
-            # The details go to the log only; the report just has the counts.
-            print(f"  newly failing: {len(result['newly_failing'])}")
-            for test in result["newly_failing"]:
-                print(f"    {test}")
-                message = result["after"]["messages"].get(test, "").strip()
-                if message:
-                    print("      " + message.replace("\n", "\n      "))
-            print(f"  newly passing: {len(result['newly_passing'])}")
-            for test in result["newly_passing"]:
-                print(f"    {test}")
-        # Keep the JSON small: the per-test outcomes were only needed for the diff.
-        for label in ("before", "after"):
-            result[label].pop("outcomes", None)
-            result[label].pop("messages", None)
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        shutil.rmtree(pkg_dir, ignore_errors=True)
+
+    if len(outcomes) == 2:
+        old, new = outcomes["before"], outcomes["after"]
+        result["newly_failing"] = sorted(
+            t for t, o in new.items() if o in BROKEN and old.get(t) not in BROKEN
+        )
+        result["newly_passing"] = sorted(
+            t for t, o in new.items() if o == "passed" and old.get(t) in BROKEN
+        )
+        # The details go to the log only; the report just has the counts.
+        print(f"  newly failing: {len(result['newly_failing'])}")
+        for test in result["newly_failing"]:
+            print(f"    {test}")
+            if messages.get(test, "").strip():
+                print("      " + messages[test].strip().replace("\n", "\n      "))
+        print(f"  newly passing: {len(result['newly_passing'])}")
+        for test in result["newly_passing"]:
+            print(f"    {test}")
     return result
 
 
 def _regressed(result):
-    if result["newly_failing"]:
-        return True
-    return (
-        "install_error" in result["after"] and "install_error" not in result["before"]
-    )
+    """New test failures, or an install that worked before and now fails."""
+    before, after = result["before"], result["after"]
+    broke_install = "install_error" in after and "install_error" not in before
+    return bool(result["newly_failing"]) or broke_install
 
 
-def _summary_cell(result, label):
-    side = result[label]
-    if result.get("error"):
-        return "not tested"
+def _summary_cell(side):
     if "install_error" in side:
         return "install failed"
     if "counts" not in side:
         return "-"
-    c = side["counts"]
-    broken = c["failed"] + c["error"]
-    return (
-        f"{c['passed']} passed, {broken} failing" if broken else f"{c['passed']} passed"
-    )
+    passed = side["counts"].get("passed", 0)
+    broken = sum(side["counts"].get(o, 0) for o in BROKEN)
+    return f"{passed} passed, {broken} failing" if broken else f"{passed} passed"
 
 
 def render_report(results):
@@ -291,8 +235,8 @@ def render_report(results):
         version = r["after"].get("version") or r["before"].get("version", "")
         failing = len(r["newly_failing"])
         lines.append(
-            f"| {r['name']} {version} | {_summary_cell(r, 'before')} "
-            f"| {_summary_cell(r, 'after')} | {f'**{failing}**' if failing else ''} "
+            f"| {r['name']} {version} | {_summary_cell(r['before'])} "
+            f"| {_summary_cell(r['after'])} | {f'**{failing}**' if failing else ''} "
             f"| {len(r['newly_passing']) or ''} |"
         )
     run_url = "{GITHUB_SERVER_URL}/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}"
@@ -348,47 +292,51 @@ def run_compare(args):
     if not args.report_only:
         if not (args.before and args.after):
             sys.exit("--before and --after are required unless --report-only is given")
-        packages = config.load_packages(args.config)
         changed = canonicalize_name(args.package)
-        if changed not in {canonicalize_name(p["pypi_name"]) for p in packages}:
+        all_packages = config.load_packages(args.config)
+        if changed not in {canonicalize_name(p["pypi_name"]) for p in all_packages}:
             sys.exit(f"--package {args.package} is not listed in {args.config}")
-        packages = [p for p in packages if canonicalize_name(p["pypi_name"]) != changed]
-        if args.tiers:
-            tiers = {t.strip() for t in args.tiers.split(",")}
-            packages = [p for p in packages if p.get("tier", "") in tiers]
-        if args.packages:
-            wanted = {
-                canonicalize_name(n) for n in args.packages.split(",") if n.strip()
-            }
-            packages = [
-                p for p in packages if canonicalize_name(p["pypi_name"]) in wanted
-            ]
+        packages = [
+            p
+            for p in run.select_packages(all_packages, args.tiers, args.packages)
+            if canonicalize_name(p["pypi_name"]) != changed
+        ]
         if not packages:
             sys.exit("No downstream packages selected.")
-        cfg = {
-            "constraints": config.load_constraints(args.config),
-            "dev_index_urls": config.load_dev_index_urls(args.config),
-            "test_deps": config.load_test_deps(args.config),
-        }
-        timeouts = {"install": args.timeout_install, "test": args.timeout_test}
-        for pkg in packages:
-            result = compare_package(
-                pkg,
-                args.package,
-                args.before,
-                args.after,
-                cfg,
-                args.variant,
-                args.python,
-                Path.cwd(),
-                timeouts,
+
+        settings = config.load_settings(args.config)
+        Path(".tmp").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=Path(".tmp").resolve()) as workdir:
+            constraints_file = os.path.join(workdir, "constraints.txt")
+            Path(constraints_file).write_text(
+                "".join(
+                    c["spec"] + "\n"
+                    for c in settings["constraints"]
+                    if args.variant in c["variants"]
+                )
             )
-            out = results_dir / f"{canonicalize_name(pkg['pypi_name'])}.json"
-            out.write_text(json.dumps(result, indent=2))
+            ctx = SimpleNamespace(
+                changed=args.package,
+                before_spec=args.before,
+                after_spec=args.after,
+                variant=args.variant,
+                python=run.ensure_python(args.python),
+                options=run.uv_options(args.variant, settings["dev_index_urls"]),
+                constraints_file=constraints_file,
+                infra=run.TEST_INFRA + settings["test_deps"],
+                timeouts={"install": args.timeout_install, "test": args.timeout_test},
+                repo_root=Path.cwd(),
+                workdir=workdir,
+            )
+            ctx.before_req = _requirement(ctx, args.before, "before")
+            ctx.after_req = _requirement(ctx, args.after, "after")
+            for pkg in packages:
+                result = compare_package(pkg, ctx)
+                out = results_dir / f"{canonicalize_name(pkg['pypi_name'])}.json"
+                out.write_text(json.dumps(result, indent=2))
 
     results = [json.loads(f.read_text()) for f in sorted(results_dir.glob("*.json"))]
-    report = render_report(results)
-    Path(args.report).write_text(report)
+    Path(args.report).write_text(render_report(results))
     print(f"\nWrote {args.report}")
     if any(_regressed(r) for r in results):
         sys.exit(1)
