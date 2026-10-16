@@ -129,6 +129,38 @@ def _installed(python):
     return {canonicalize_name(p["name"]): p["version"] for p in json.loads(proc.stdout)}
 
 
+def uv_options(variant, dev_index_urls):
+    """uv resolve/install options for a variant (everything except --python)."""
+    options = []
+    if variant in ("pre", "dev"):
+        options += ["--prerelease", "allow"]
+    if variant == "dev" and dev_index_urls:
+        for url in dev_index_urls:
+            options += ["--extra-index-url", url]
+        # A nightly channel only hosts some packages and its wheels may
+        # not cover this platform, so let uv pick the best match across
+        # every index rather than stopping at the first that has a name.
+        options += ["--index-strategy", "unsafe-best-match"]
+    return options
+
+
+def select_packages(packages, tiers=None, names=None):
+    """Filter packages by comma-separated tiers and names; exit on unknown names."""
+    if names:
+        wanted = {canonicalize_name(n) for n in names.split(",") if n.strip()}
+        unknown = wanted - {canonicalize_name(p["pypi_name"]) for p in packages}
+        if unknown:
+            sys.exit(
+                f"Unknown package name(s): {', '.join(sorted(unknown))}. "
+                "Valid names are the pypi_name entries in the config."
+            )
+        packages = [p for p in packages if canonicalize_name(p["pypi_name"]) in wanted]
+    if tiers:
+        wanted_tiers = {t.strip() for t in tiers.split(",") if t.strip()}
+        packages = [p for p in packages if p.get("tier", "") in wanted_tiers]
+    return packages
+
+
 class Column:
     """uv settings shared by every resolve and install in one column."""
 
@@ -138,16 +170,7 @@ class Column:
         self.timeout = timeout
         self.constraints_file = constraints_file
         self.floors_file = os.path.join(tmpdir, "floors.txt")
-        self.options = ["--python", python]
-        if variant in ("pre", "dev"):
-            self.options += ["--prerelease", "allow"]
-        if variant == "dev" and dev_index_urls:
-            for url in dev_index_urls:
-                self.options += ["--extra-index-url", url]
-            # A nightly channel only hosts some packages and its wheels may
-            # not cover this platform, so let uv pick the best match across
-            # every index rather than stopping at the first that has a name.
-            self.options += ["--index-strategy", "unsafe-best-match"]
+        self.options = ["--python", python, *uv_options(variant, dev_index_urls)]
 
     def resolve(self, requirements, floors=True, no_deps=False):
         """Resolve requirements without installing. Returns (pins, error)."""
@@ -369,47 +392,9 @@ def run_variant(
         }
         for name, entry in to_test:
             print(f"\nTesting {entry['name']}...")
-            cmd = [
-                python,
-                "-m",
-                "pytest",
-                "--pyargs",
-                entry["module"],
-                *pytest_args[name],
-            ]
-            cmd += ["--timeout=120", "-q", "--tb=line", "--no-header"]
-            env = {**os.environ, "MPLBACKEND": "Agg", "DISPLAY": ""}
-            start = time.time()
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeouts["test"],
-                    cwd=repo_root,
-                    env=env,
-                )
-            except subprocess.TimeoutExpired:
-                entry["test_status"] = status.TIMEOUT
-                entry["test_output"] = "timeout"
-                entry["duration"] = round(time.time() - start, 1)
-                print(f"  timeout after {entry['duration']}s")
-                continue
-            entry["duration"] = round(time.time() - start, 1)
-            out = proc.stdout
-            if proc.stderr:
-                out += "\n--- stderr ---\n" + proc.stderr
-            entry["test_output"] = out
-
-            no_module = proc.returncode == 4 and "module or package not found" in (
-                proc.stdout + proc.stderr
+            entry["test_status"], entry["test_output"], entry["duration"] = run_tests(
+                python, entry["module"], pytest_args[name], repo_root, timeouts["test"]
             )
-            if proc.returncode == 5 or no_module:
-                entry["test_status"] = status.NO_TESTS
-            elif proc.returncode == 0:
-                entry["test_status"] = status.PASS
-            else:
-                entry["test_status"] = status.FAIL
             print(f"  {entry['test_status']} in {entry['duration']}s")
 
     finally:
@@ -419,6 +404,36 @@ def run_variant(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     return result, out_path
+
+
+def run_tests(
+    python, module, pytest_args, repo_root, timeout, junit_path=None, traceback="line"
+):
+    """Run one package's tests with ``pytest --pyargs``.
+
+    Runs from ``repo_root`` so the consuming repo's ``conftest.py`` applies.
+    Returns (test_status, output, duration in seconds).
+    """
+    cmd = [python, "-m", "pytest", "--pyargs", module, *pytest_args]
+    cmd += ["--timeout=120", "-q", f"--tb={traceback}", "--no-header"]
+    if junit_path:
+        cmd.append(f"--junitxml={junit_path}")
+    env = {**os.environ, "MPLBACKEND": "Agg", "DISPLAY": ""}
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=repo_root, env=env
+        )
+    except subprocess.TimeoutExpired:
+        return status.TIMEOUT, "timeout", round(time.time() - start, 1)
+    duration = round(time.time() - start, 1)
+    out = proc.stdout
+    if proc.stderr:
+        out += "\n--- stderr ---\n" + proc.stderr
+    no_module = proc.returncode == 4 and "module or package not found" in out
+    if proc.returncode == 5 or no_module:
+        return status.NO_TESTS, out, duration
+    return (status.PASS if proc.returncode == 0 else status.FAIL), out, duration
 
 
 def _sort_by_tier(packages):
@@ -470,25 +485,10 @@ def run(args):
     # instead of buffering until the script exits.
     sys.stdout.reconfigure(line_buffering=True)
 
-    all_packages = config.load_packages(args.config)
-    cfg = {
-        "constraints": config.load_constraints(args.config),
-        "dev_index_urls": config.load_dev_index_urls(args.config),
-        "test_deps": config.load_test_deps(args.config),
-    }
-    packages = all_packages
-    if args.tiers:
-        wanted_tiers = {t.strip() for t in args.tiers.split(",") if t.strip()}
-        packages = [p for p in packages if p.get("tier", "") in wanted_tiers]
-    if args.packages:
-        wanted = {n.strip() for n in args.packages.split(",") if n.strip()}
-        unknown = wanted - {p["pypi_name"] for p in all_packages}
-        if unknown:
-            sys.exit(
-                f"Unknown package name(s): {', '.join(sorted(unknown))}. "
-                f"Valid names are the pypi_name entries in {args.config}."
-            )
-        packages = [p for p in packages if p["pypi_name"] in wanted]
+    cfg = config.load_settings(args.config)
+    packages = select_packages(
+        config.load_packages(args.config), args.tiers, args.packages
+    )
     packages = _sort_by_tier(packages)
 
     repo_root = Path.cwd()

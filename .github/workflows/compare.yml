@@ -1,0 +1,138 @@
+name: compare
+
+# Reusable workflow: test downstream packages before and after a change to
+# one package (typically a pull request to it), and report the tests that
+# newly fail. See `integration-dashboard compare --help` for how the two
+# environments are built. The package list comes from an integration
+# config, by default the caller's own; pass config-repository to use a
+# config kept in another repository.
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: The listed package being changed, e.g. astropy.
+        type: string
+        required: true
+      before:
+        description: pip URL of the package before the change (git+https://...@<commit>).
+        type: string
+        required: true
+      after:
+        description: pip URL of the package after the change.
+        type: string
+        required: true
+      config-repository:
+        description: Repository holding the integration config (default the caller's).
+        type: string
+        default: ''
+      config:
+        description: Path to the config within that repository.
+        type: string
+        default: packages.yaml
+      packages:
+        description: Comma-separated downstream packages to test (default all).
+        type: string
+        default: ''
+      tiers:
+        description: Comma-separated tiers of downstream packages to test (default all).
+        type: string
+        default: ''
+      variant:
+        description: How downstream packages are installed; dev means their main branch.
+        type: string
+        default: dev
+      python:
+        description: Python version to test on.
+        type: string
+        default: '3.12'
+      package-spec:
+        description: pip install target for the integration-dashboard package itself.
+        type: string
+        default: git+https://github.com/astrofrog/integration-dashboard@compare-command
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      packages: ${{ steps.list.outputs.packages }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ inputs.config-repository || github.repository }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: List the downstream packages to test
+        id: list
+        env:
+          CONFIG: ${{ inputs.config }}
+          CHANGED: ${{ inputs.package }}
+          PACKAGES: ${{ inputs.packages }}
+          TIERS: ${{ inputs.tiers }}
+        run: |
+          pip install pyyaml packaging
+          python -c '
+          import json, os, yaml
+          from packaging.utils import canonicalize_name as canon
+          pkgs = yaml.safe_load(open(os.environ["CONFIG"]))["packages"]
+          wanted = {canon(n) for n in os.environ["PACKAGES"].split(",") if n.strip()}
+          tiers = {t.strip() for t in os.environ["TIERS"].split(",") if t.strip()}
+          names = [
+              p["pypi_name"] for p in pkgs
+              if canon(p["pypi_name"]) != canon(os.environ["CHANGED"])
+              and (not wanted or canon(p["pypi_name"]) in wanted)
+              and (not tiers or p.get("tier", "") in tiers)
+          ]
+          print("packages=" + json.dumps(names))
+          ' >> "$GITHUB_OUTPUT"
+
+  compare:
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.setup.outputs.packages) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # Tests run from the config repository's root, so its conftest.py and
+      # any per-package pytest config files apply.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ inputs.config-repository || github.repository }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+
+      - name: Install integration-dashboard
+        env:
+          PACKAGE_SPEC: ${{ inputs.package-spec }}
+        run: pip install "$PACKAGE_SPEC"
+
+      # Fails if the package has new failures; the tracebacks and a summary
+      # line are in the log.
+      - name: Compare ${{ matrix.package }}
+        env:
+          CONFIG: ${{ inputs.config }}
+          CHANGED: ${{ inputs.package }}
+          BEFORE: ${{ inputs.before }}
+          AFTER: ${{ inputs.after }}
+          VARIANT: ${{ inputs.variant }}
+          PYTHON: ${{ inputs.python }}
+          DOWNSTREAM: ${{ matrix.package }}
+        run: |
+          integration-dashboard compare --config "$CONFIG" --package "$CHANGED" \
+            --before "$BEFORE" --after "$AFTER" --packages "$DOWNSTREAM" \
+            --variant "$VARIANT" --python "$PYTHON"

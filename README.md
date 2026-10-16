@@ -147,6 +147,56 @@ constraints:
 
 `dashboard_title` (optional) sets the dashboard heading.
 
+Comparing before and after a change
+-----------------------------------
+
+`integration-dashboard compare` answers a narrower question than the
+dashboard: did a change to one package, typically a pull request, break any
+of the packages that depend on it? It reuses the same config, but tests each
+downstream package on its own rather than in a shared venv:
+
+```bash
+integration-dashboard compare --package astropy \
+    --before git+https://github.com/astropy/astropy@<base commit> \
+    --after /path/to/astropy-checkout \
+    --tiers coordinated
+```
+
+`--before` and `--after` are pip URLs or local paths for the changed package.
+A local path is built into a wheel once at the start of the run, so every
+downstream package is tested against the same build of its current contents.
+For each downstream package, the "before" venv is resolved and locked (git
+installs are locked to a commit, so both runs test the same downstream code),
+and the "after" venv is built from the same lock with only the changed package
+swapped. The individual test results are then compared, so the output lists
+the tests that newly fail even when a downstream package already has failing
+tests of its own. The output shows the full traceback of every newly failing
+test (and any install errors), then a one-line summary per package. The
+command exits non-zero if anything newly fails, or if either environment fails
+to install, since the change could then not be checked.
+
+The `compare.yml` reusable workflow runs one job per downstream package, which
+fails if that package has new failures; its log ends with the tracebacks and
+the summary line. For example, in the changed package's repository:
+
+```yaml
+name: downstream
+on:
+  pull_request:
+    types: [labeled, synchronize]
+jobs:
+  compare:
+    if: contains(github.event.pull_request.labels.*.name, 'needs-downstream-testing')
+    uses: OpenAstronomy/integration-dashboard/.github/workflows/compare.yml@main
+    with:
+      config-repository: astropy/astropy-integration-testing
+      package: astropy
+      # The PR's test merge commit is its base commit plus the PR's changes.
+      before: git+https://github.com/astropy/astropy@${{ github.event.pull_request.base.sha }}
+      after: git+https://github.com/astropy/astropy@${{ github.event.pull_request.merge_commit_sha }}
+      tiers: coordinated
+```
+
 Continuous integration (reusable workflow)
 ------------------------------------------
 
