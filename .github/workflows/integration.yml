@@ -60,9 +60,9 @@ jobs:
       libraries-brew-cask: ${{ steps.libraries.outputs.brew-cask }}
       libraries-choco: ${{ steps.libraries.outputs.choco }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
 
@@ -119,17 +119,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # This Python only runs the integration-dashboard orchestrator CLI;
       # the test venv for `matrix.python` is built separately by uv (see
       # the `run` step below), so a fixed version is fine here.
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           # We manage the cache ourselves via actions/cache below; turning
           # off setup-uv's own caching avoids it saving a duplicate of the
@@ -137,7 +137,7 @@ jobs:
           enable-cache: false
 
       - name: Cache ~/.cache/uv
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           # Primary key uses the run id, so every run writes a fresh
@@ -181,7 +181,7 @@ jobs:
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: results-${{ matrix.variant }}-${{ matrix.python }}
           path: results/${{ matrix.variant }}__${{ matrix.python }}.json
@@ -194,9 +194,9 @@ jobs:
     permissions:
       contents: write   # to push gh-pages when inputs.publish is true
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
 
@@ -204,7 +204,7 @@ jobs:
         run: pip install ${{ inputs.package-spec }}
 
       - name: Download all variant results
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           pattern: results-*
           merge-multiple: true
@@ -217,7 +217,7 @@ jobs:
       # even runs that don't publish (PRs, or publish=false) leave output.
       - name: Upload dashboard artifact
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dashboard
           path: site/
@@ -227,7 +227,7 @@ jobs:
       # the caller repo).
       - name: Upload preview artifact
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           # With `archive: false`, the preview-link redirector matches on
           # the uploaded file's basename (index.html -> index), not this
